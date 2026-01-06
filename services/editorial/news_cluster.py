@@ -7,11 +7,20 @@ from loguru import logger
 from sqlalchemy import select, func, text, and_, desc, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 from sqlalchemy import create_engine
+from dataclasses import dataclass
 
 # Models
 from news_events_lib.models import NewsEventModel, ArticleModel, MergeProposalModel
-from models import ArticlesQueueModel, ArticlesQueueName, ClusterResult, JobStatus, EventsQueueName
+from models import ArticlesQueueModel, ArticlesQueueName, JobStatus, EventsQueueName
 from config import Settings
+
+# Defined here for clarity, but ideally belongs in models.py
+@dataclass
+class ClusterResult:
+    action: str  # 'MERGE', 'PROPOSE', 'PROPOSE_MULTI', 'NEW'
+    event_id: Optional[uuid.UUID]
+    candidates: List[dict]
+    reason: str
 
 class NewsCluster:
     def __init__(self):
@@ -22,8 +31,6 @@ class NewsCluster:
         )
         
         # --- TUNING KNOBS ---
-        # 0.12 is very strict (good for auto-merge)
-        # 0.23 covers "same topic, different angle" (good for proposals)
         self.SIMILARITY_STRICT = 0.12 
         self.SIMILARITY_LOOSE = 0.23   
 
@@ -38,7 +45,7 @@ class NewsCluster:
         """
         Returns list of (NewsEventModel, rrf_score, vector_distance)
         """
-        # 1. Semantic Search CTE (Now returns DISTANCE)
+        # 1. Semantic Search CTE
         semantic_subq = (
             select(
                 NewsEventModel.id,
@@ -82,9 +89,6 @@ class NewsCluster:
             func.coalesce(1.0 / (rrf_k + kw_alias.c.rank), 0.0)
         )
 
-        # IMPORTANT: If 'dist' is NULL (meaning it was found ONLY by keyword search),
-        # we treat distance as 1.0 (Max Distance/Irrelevant). 
-        # We only auto-merge if the VECTOR confirms it.
         distance_expression = func.coalesce(sem_alias.c.dist, 1.0)
 
         stmt = (
@@ -112,42 +116,38 @@ class NewsCluster:
     def derive_search_query(self, article: ArticleModel) -> str:
         parts = []
         if article.entities:
-            parts.extend(article.entities[:5]) # Strongest signal
+            parts.extend(article.entities[:5]) 
         if article.main_topics and len(parts) < 3:
             parts.extend(article.main_topics[:2])
         if not parts:
-            return article.title # Fallback
+            return article.title 
         return " ".join(parts)
 
     def cluster_existing_article(self, session: Session, article: ArticleModel) -> ClusterResult:
         text_query = self.derive_search_query(article)
         vector = article.embedding
         
-        # 1. Search (Returns: Event, RRF_Score, Vector_Dist, Text_Rank)
-        # Note: You need to update search_news_events_hybrid to return Text Rank too
+        if not vector:
+            # Fallback if vector is missing (shouldn't happen with NewsGetter)
+            return ClusterResult('ERROR', None, [], "Missing Vector")
+            
         candidates = self.search_news_events_hybrid(session, text_query, vector)
         
+        # --- SCENARIO 0: NO CANDIDATES ---
         if not candidates:
-            return self._create_new_event(session, article, vector)
+            new_id = self._create_new_event(session, article, vector, reason="No Candidates Found")
+            return ClusterResult('NEW', new_id, [], "No Matches")
 
         best_ev, rrf_score, vec_dist = candidates[0]
         
         # --- SCENARIO 2: THE BUZZWORD TRAP (Keyword High, Vector Low) ---
-        # Even if RRF picked it, if the vector distance is Red, trust the vector.
-        if vec_dist > self.SIMILARITY_LOOSE: # > 0.23
-            # It's a different topic involving the same entities.
-            return self._create_new_event(session, article, vector, 
-                                          reason=f"Vector Dist {vec_dist:.2f} too high (Buzzword Trap)")
+        if vec_dist > self.SIMILARITY_LOOSE: 
+            reason = f"Vector Dist {vec_dist:.2f} too high (Buzzword Trap)"
+            new_id = self._create_new_event(session, article, vector, reason=reason)
+            return ClusterResult('NEW', new_id, [], reason)
 
-        # --- SCENARIO 3: THE VIBE TRAP (Vector High, Keyword Low) ---
-        # This requires checking the 'Text Rank'. 
-        # If we are Green (<0.12) but Keywords are weak, we pause.
-        # (Assuming you add a check for text match quality, simplified here as:)
-        # strict_text_match = (text_query in best_ev.search_text) 
-        
-        # --- SCENARIO 4: THE EVOLUTION (Medium Vector, High Keyword) ---
+        # --- SCENARIO 4: THE EVOLUTION (Yellow Zone) ---
         if self.SIMILARITY_STRICT < vec_dist < self.SIMILARITY_LOOSE:
-            # This is the classic "Yellow Zone"
             self._create_proposal(session, article, best_ev, vec_dist)
             return ClusterResult('PROPOSE', best_ev.id, [], f"Yellow Zone ({vec_dist:.3f})")
 
@@ -155,7 +155,6 @@ class NewsCluster:
         if len(candidates) > 1:
             second_ev, _, second_dist = candidates[1]
             if (second_dist - vec_dist) < 0.05:
-                # Create Multiple Proposals
                 options = []
                 for ev, _, dist in candidates[:3]:
                     if dist < self.SIMILARITY_LOOSE:
@@ -170,7 +169,6 @@ class NewsCluster:
 
     def _link_to_event(self, session, event: NewsEventModel, article: ArticleModel, vector: list[float]):
         """Updates centroid and links article"""
-        # Weighted Average Centroid Update
         current_centroid = np.array(event.embedding_centroid)
         new_vector = np.array(vector)
         n = event.article_count
@@ -180,26 +178,41 @@ class NewsCluster:
         event.article_count += 1
         event.last_updated_at = datetime.utcnow()
         
-        # Simple text append for search (Postgres handles dedupe in tsvector usually)
         if event.search_text:
             event.search_text += f" {article.title}"
             
         article.event_id = event.id
         return event.id
 
-    def _create_proposal(self, session, article, event, score):
-        prop = MergeProposalModel(
-            id=uuid.uuid4(),
-            source_article_id=article.id,
-            target_event_id=event.id,
-            similarity_score=float(score),
-            status="pending",
-            reasoning=f"RRF Match. Vector Dist {score:.3f} in Yellow Zone."
-        )
-        session.add(prop)
-        logger.info(f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]}")
+    def _create_proposal(self, session, article, event, score, ambiguous=False):
+        # FIX: Added 'ambiguous' parameter
+        exists = session.execute(
+            select(MergeProposalModel).where(
+                and_(
+                    MergeProposalModel.source_article_id == article.id,
+                    MergeProposalModel.target_event_id == event.id
+                )
+            )
+        ).scalar()
+        
+        if not exists:
+            reason = f"RRF Match. Vector Dist {score:.3f}"
+            if ambiguous:
+                reason += " (AMBIGUOUS)"
+            
+            prop = MergeProposalModel(
+                id=uuid.uuid4(),
+                source_article_id=article.id,
+                target_event_id=event.id,
+                similarity_score=float(score),
+                status="pending",
+                reasoning=reason
+            )
+            session.add(prop)
+            logger.info(f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})")
 
-    def _create_new_event(self, session, article, vector):
+    def _create_new_event(self, session, article, vector, reason=""):
+        # FIX: Added 'reason' parameter (mostly for logging)
         new_event = NewsEventModel(
             id=uuid.uuid4(),
             title=article.title,
@@ -211,10 +224,10 @@ class NewsCluster:
             search_text=f"{article.title} {self.derive_search_query(article)}"
         )
         session.add(new_event)
-        session.flush() # Get ID
+        session.flush() 
         
         article.event_id = new_event.id
-        logger.info(f"🆕 New Event created: {new_event.title[:20]}")
+        logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
         return new_event.id
 
     async def run(self):
@@ -249,20 +262,28 @@ class NewsCluster:
                         article = session.merge(article)
                         queue = session.merge(queue)
                         
-                        event_id = self.cluster_existing_article(session, article)
+                        # Get Decision Object
+                        decision: ClusterResult = self.cluster_existing_article(session, article)
                         
-                        if event_id:
-                            # Green/Red -> Move to Enhancer
+                        # FIX: Handle the Enum-like Actions
+                        if decision.action in ['MERGE', 'NEW']:
+                            # Success -> Move to Enhancer
                             queue.status = JobStatus.PENDING
                             queue.queue_name = EventsQueueName.ENHANCER
-                            # IMPORTANT: Queue needs event_id reference now? 
-                            # If your EventsQueue is separate, you might need to insert there instead.
-                            # Assuming ArticlesQueue just flows through:
-                        else:
-                            # Yellow -> Park it
-                            queue.status = JobStatus.COMPLETED
-                            queue.msg = "Waiting for Proposal"
+                            # Note: We don't store event_id in queue, the Article model has it now.
+                            logger.success(f"Action {decision.action}: {article.title[:20]} -> ENHANCE")
                             
+                        elif decision.action in ['PROPOSE', 'PROPOSE_MULTI']:
+                            # Parked -> Waiting for Admin CLI
+                            queue.status = JobStatus.COMPLETED
+                            queue.msg = f"Parked: {decision.reason}"
+                            logger.warning(f"Action {decision.action}: {article.title[:20]} -> PARKED")
+                            
+                        else:
+                            # Fallback Error
+                            queue.status = JobStatus.FAILED
+                            queue.msg = f"Unknown Action: {decision.action}"
+
                         queue.updated_at = datetime.utcnow()
                         
                     except Exception as e:
@@ -272,3 +293,7 @@ class NewsCluster:
                 
                 session.commit()
                 logger.success(f"Processed {len(result)} articles.")
+
+if __name__ == "__main__":
+    cluster = NewsCluster()
+    asyncio.run(cluster.run())
