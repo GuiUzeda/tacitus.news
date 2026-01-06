@@ -30,10 +30,8 @@ class NewsCluster:
             autocommit=False, autoflush=False, bind=self.engine
         )
         
-        # --- TUNING KNOBS ---
-        self.SIMILARITY_STRICT = 0.12 
-        self.SIMILARITY_LOOSE = 0.23   
-
+        self.SIMILARITY_STRICT = self.settings.similarity_strict
+        self.SIMILARITY_LOOSE = self.settings.similarity_loose
     def search_news_events_hybrid(
         self,
         session: Session,

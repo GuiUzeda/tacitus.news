@@ -210,7 +210,8 @@ class NewsEnhancerWorker:
                         session.add(event)
 
                     # Finish Job
-                    job.status = JobStatus.COMPLETED
+                    job.status = JobStatus.PROCESSING
+                    job.queue_name = EventsQueueName.PUBLISHER
                     job.updated_at = datetime.utcnow()
                     session.commit()
                     
