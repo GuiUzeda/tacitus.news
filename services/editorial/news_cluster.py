@@ -167,8 +167,12 @@ class NewsCluster:
         self._link_to_event(session, best_ev, article, vector)
         return ClusterResult('MERGE', best_ev.id, [], "Perfect Match")
 
-    def _link_to_event(self, session, event: NewsEventModel, article: ArticleModel, vector: list[float]):
+    def _link_to_event(self, session, event: Optional[NewsEventModel], article: Optional[ArticleModel], vector: Optional[list[float]]):
         """Updates centroid and links article"""
+        
+        if not event or not article or not vector:
+            return None
+        
         current_centroid = np.array(event.embedding_centroid)
         new_vector = np.array(vector)
         n = event.article_count

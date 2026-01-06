@@ -68,7 +68,7 @@ class ArticlesQueueModel(BaseModel):
         ),
     )
     
-class EventsQueue():
+class EventsQueueModel(BaseModel):
     @declared_attr.directive
     def __tablename__(cls) -> str:
         return 'events_queue'
