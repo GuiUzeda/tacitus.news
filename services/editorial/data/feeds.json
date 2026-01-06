@@ -1,0 +1,154 @@
+[
+  {
+    "name": "UOL",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "allowed_sections": "(/newsletters/|/economia/|/colunas/|/internacional/|/cotidiano/)",
+        "url": "https://noticias.uol.com.br/sitemap/v2/news-01.xml"
+      }
+    ]
+  },
+  {
+    "name": "O Globo",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/blogs/)",
+        "url": "https://oglobo.globo.com/sitemap/oglobo/news.xml"
+      }
+    ]
+  },
+  {
+    "name": "Estadão",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/)",
+        "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap/latest/?outputType=xml"
+      }
+    ]
+  },
+  {
+    "name": "Poder 360",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "url": "https://www.poder360.com.br/sitemap_index.xml"
+      }
+    ]
+  },
+  {
+    "name": "ICL Notícias",
+    "bias": "left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "url": "https://iclnoticias.com.br/news-sitemap.xml"
+      }
+    ]
+  },
+  {
+    "name": "CartaCapital",
+    "bias": "left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "allowed_sections": "(/politica/|/economia/|/mundo/|/justica/|/sociedade/|/cartaexpressa/)",
+        "url": "https://www.cartacapital.com.br/sitemap_index.xml"
+      }
+    ]
+  },
+  {
+    "name": "Folha de S.Paulo",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "url": "https://www1.folha.uol.com.br/mundo/sitemap.xml"
+      },
+      {
+        "url": "https://www1.folha.uol.com.br/colunas/sitemap.xml"
+      },
+      {
+        "url": "https://www1.folha.uol.com.br/mercado/sitemap.xml"
+      },
+      {
+        "url": "https://www1.folha.uol.com.br/poder/sitemap.xml"
+      }
+    ]
+  },
+  {
+    "name": "CNN Brasil",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "blocklist": "None",
+        "allowed_sections": "(/politica/|/economia/|/mundo/)",
+        "url": "https://www.cnnbrasil.com.br/sitemap_index.xml"
+      }
+    ]
+  },
+  {
+    "name": "G1",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "blocklist": "None",
+        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/)",
+        "url": "https://g1.globo.com/sitemap/g1/news.xml"
+      }
+    ]
+  },
+  {
+    "name": "R7",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+
+        "url": "https://www.r7.com/arc/outboundfeeds/sitemap-news/?outputType=xml"
+      }
+    ]
+  }
+  ,
+  {
+    "name": "Jovem Pan",
+    "bias": "right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+
+        "url": "https://jovempan.com.br/feed"
+      }
+    ]
+  }
+]

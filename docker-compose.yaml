@@ -1,0 +1,42 @@
+services:
+  postgre:
+    build:
+      context: .
+      dockerfile: services/db/Dockerfile
+    restart: always
+    environment:
+      - POSTGRES_USER=postgre
+      - POSTGRES_PASSWORD=postgre
+      - POSTGRES_DB=postgre
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./dev/db_data:/var/lib/postgresql
+    networks:
+      - db_network
+  backend:
+    depends_on:
+      - postgre
+    image: editorial/backend
+    build:
+      context: .
+      dockerfile: services/backend/Dockerfile
+      network: host
+    environment:
+      - PG_DSN=postgresql://postgre:postgre@postgre:5432/postgre
+    entrypoint: ["uvicorn", "app.main:app" , "--host", "0.0.0.0", "--port", "8080" ,"--reload"]
+    volumes: 
+      - ./services/backend/app:/code/app
+    ports:
+      - "8080:8080"
+    networks:
+      - db_network
+volumes:
+  services:
+    external: true   
+networks:
+  db_network: {}
