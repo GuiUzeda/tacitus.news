@@ -35,7 +35,11 @@ class EventStatus(str, enum.Enum):
     ENHANCED = "enhanced"     # LLM has written the summary
     PUBLISHED = "published"   # Live on Frontend
     ARCHIVED = "archived"     # Old news, removed from feed
-    
+class JobStatus(enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"    
 class BaseModel(DeclarativeBase):
     """Modern SQLAlchemy 2.0 Base."""
     @declared_attr.directive
@@ -143,6 +147,8 @@ class ArticleModel(BaseModel):
     original_url: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
     published_date: Mapped[datetime] = mapped_column(DateTime)
+    summary_date: Mapped[datetime] = mapped_column(DateTime)
+    summary_status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING, index=True)
 
     # CHANGED: These are rarely in RSS -> Nullable
     subtitle: Mapped[Optional[str]] = mapped_column(String, nullable=True)

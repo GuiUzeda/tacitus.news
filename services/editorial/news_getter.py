@@ -17,13 +17,14 @@ from config import Settings
 from harvesters.factory import HarvesterFactory
 from llm_parser import CloudNewsFilter
 from loguru import logger
-from models import JobStatus, ArticlesQueueModel, ArticlesQueueName
+from models import  ArticlesQueueModel, ArticlesQueueName
 from news_events_lib.models import (
     ArticleContentModel,
     ArticleModel,
     AuthorModel,
     FeedModel,
     NewspaperModel,
+    JobStatus
 )
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import Row, create_engine, select

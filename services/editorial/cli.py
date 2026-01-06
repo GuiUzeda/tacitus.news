@@ -16,16 +16,18 @@ from rich.markdown import Markdown
 
 # Project Imports
 from config import Settings
+
 # Local Editorial Models
 from models import (
-    ArticlesQueueModel, EventsQueueModel, # Separate queues
-    JobStatus, EventsQueueName
+    ArticlesQueueModel,
+    EventsQueueModel,  # Separate queues
+    JobStatus,
+    EventsQueueName,
 )
+
 # Shared Lib Models
 
-from news_events_lib.models import (
-    ArticleModel, NewsEventModel, MergeProposalModel
-)
+from news_events_lib.models import ArticleModel, NewsEventModel, MergeProposalModel
 
 
 from news_cluster import NewsCluster
@@ -35,6 +37,7 @@ settings = Settings()
 engine = create_engine(str(settings.pg_dsn))
 SessionLocal = sessionmaker(bind=engine)
 
+
 class EditorialCLI:
     def __init__(self):
         self.cluster_service = NewsCluster()
@@ -42,28 +45,53 @@ class EditorialCLI:
     def start(self):
         while True:
             console.clear()
-            console.print(Panel.fit("📰 Tacitus Editorial Control Room", style="bold blue"))
-            
+            console.print(
+                Panel.fit("📰 Tacitus Editorial Control Room", style="bold blue")
+            )
+
             with SessionLocal() as session:
-                pending_props = session.query(MergeProposalModel).filter_by(status='pending').count()
-                failed_arts = session.query(ArticlesQueueModel).filter_by(status=JobStatus.FAILED).count()
-                failed_evts = session.query(EventsQueueModel).filter_by(status=JobStatus.FAILED).count()
-                active_events = session.query(NewsEventModel).filter_by(is_active=True).count()
-                
+                pending_props = (
+                    session.query(MergeProposalModel)
+                    .filter_by(status="pending")
+                    .count()
+                )
+                failed_arts = (
+                    session.query(ArticlesQueueModel)
+                    .filter_by(status=JobStatus.FAILED)
+                    .count()
+                )
+                failed_evts = (
+                    session.query(EventsQueueModel)
+                    .filter_by(status=JobStatus.FAILED)
+                    .count()
+                )
+                active_events = (
+                    session.query(NewsEventModel).filter_by(is_active=True).count()
+                )
+
             console.print(f"[1] 🕵️  Review Merges ({pending_props} pending)")
-            console.print(f"[2] 🚑 Queue Manager (Arts: {failed_arts}, Evts: {failed_evts} failed)")
+            console.print(
+                f"[2] 🚑 Queue Manager (Arts: {failed_arts}, Evts: {failed_evts} failed)"
+            )
             console.print(f"[3] 🔎 Manual Search & Link")
             console.print(f"[4] 📖 Inspect Event/Article (ID Search)")
-            console.print(f"[5] 🔗 Find & Merge Duplicate Events (Total: {active_events})")
+            console.print(
+                f"[5] 🔗 Find & Merge Duplicate Events (Total: {active_events})"
+            )
             console.print(f"[q] Quit")
-            
+
             choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "q"])
-            
-            if choice == "1": self.review_merges()
-            elif choice == "2": self.queue_manager()
-            elif choice == "3": self.manual_search()
-            elif choice == "4": self.inspect_tool()
-            elif choice == "5": self.merge_duplicate_events()
+
+            if choice == "1":
+                self.review_merges()
+            elif choice == "2":
+                self.queue_manager()
+            elif choice == "3":
+                self.manual_search()
+            elif choice == "4":
+                self.inspect_tool()
+            elif choice == "5":
+                self.merge_duplicate_events()
             elif choice == "q":
                 console.print("Bye! 👋")
                 sys.exit(0)
@@ -77,10 +105,13 @@ class EditorialCLI:
                 select(MergeProposalModel)
                 .options(
                     joinedload(MergeProposalModel.source_article),
-                    joinedload(MergeProposalModel.target_event)
+                    joinedload(MergeProposalModel.target_event),
                 )
-                .where(MergeProposalModel.status == 'pending')
-                .order_by(MergeProposalModel.source_article_id, MergeProposalModel.similarity_score)
+                .where(MergeProposalModel.status == "pending")
+                .order_by(
+                    MergeProposalModel.source_article_id,
+                    MergeProposalModel.similarity_score,
+                )
             )
             all_proposals = session.execute(stmt).scalars().all()
 
@@ -90,27 +121,39 @@ class EditorialCLI:
             return
 
         from itertools import groupby
-        grouped_props = {k: list(v) for k, v in groupby(all_proposals, key=lambda x: x.source_article) if k is not None}
+
+        grouped_props = {
+            k: list(v)
+            for k, v in groupby(all_proposals, key=lambda x: x.source_article)
+            if k is not None
+        }
 
         total_groups = len(grouped_props)
         current_idx = 0
 
         for article, props in grouped_props.items():
             current_idx += 1
-            if self._handle_single_review(article, props, current_idx, total_groups) == 'quit':
+            if (
+                self._handle_single_review(article, props, current_idx, total_groups)
+                == "quit"
+            ):
                 break
 
     def _handle_single_review(self, article, props, idx, total):
         while True:
             console.clear()
             console.rule(f"Review {idx}/{total}")
-            
+
             console.print(f"[bold cyan]ARTICLE:[/bold cyan] {article.title}")
             console.print(f"[dim]{article.original_url}[/dim]")
-            console.print(Panel(textwrap.shorten(article.summary or "No summary", width=200)))
+            console.print(
+                Panel(textwrap.shorten(article.summary or "No summary", width=200))
+            )
             if article.entities:
-                console.print(f"[yellow]Entities:[/yellow] {', '.join(article.entities)}")
-            
+                console.print(
+                    f"[yellow]Entities:[/yellow] {', '.join(article.entities)}"
+                )
+
             table = Table(show_header=True, header_style="bold magenta")
             table.add_column("#", style="dim", width=4)
             table.add_column("Event Title")
@@ -125,24 +168,32 @@ class EditorialCLI:
                     p.target_event.title if p.target_event else "Unknown Event",
                     str(p.target_event.article_count) if p.target_event else "?",
                     f"[{score_color}]{p.similarity_score:.3f}[/{score_color}]",
-                    p.reasoning
+                    p.reasoning,
                 )
 
             console.print(table)
             console.print("\n[bold]Actions:[/bold]")
-            console.print("[green][#][/green] Accept Candidate   [blue][i #][/blue] Inspect   [blue][s][/blue] Search DB")
-            console.print("[red][n][/red] New Event (Reject All) [dim][skip][/dim] Skip      [dim][q][/dim] Quit")
+            console.print(
+                "[green][#][/green] Accept Candidate   [blue][i #][/blue] Inspect   [blue][s][/blue] Search DB"
+            )
+            console.print(
+                "[red][n][/red] New Event (Reject All) [dim][skip][/dim] Skip      [dim][q][/dim] Quit"
+            )
 
             choice = Prompt.ask("Decision").lower().strip()
 
-            if choice == 'q': return 'quit'
-            if choice == 'skip': return 'next'
+            if choice == "q":
+                return "quit"
+            if choice == "skip":
+                return "next"
 
-            if choice.startswith('i '):
+            if choice.startswith("i "):
                 try:
-                    idx_to_inspect = int(choice.split(' ')[1]) - 1
+                    idx_to_inspect = int(choice.split(" ")[1]) - 1
                     if 0 <= idx_to_inspect < len(props):
-                        self._inspect_event_deep_dive(props[idx_to_inspect].target_event.id)
+                        self._inspect_event_deep_dive(
+                            props[idx_to_inspect].target_event.id
+                        )
                         continue
                 except:
                     console.print("[red]Invalid command[/red]")
@@ -151,15 +202,15 @@ class EditorialCLI:
             elif choice.isdigit() and 1 <= int(choice) <= len(props):
                 selected = props[int(choice) - 1]
                 self._execute_merge(selected, props)
-                return 'next'
-                
-            elif choice == 'n':
+                return "next"
+
+            elif choice == "n":
                 self._execute_new_event(article, props)
-                return 'next'
-                
-            elif choice == 's':
+                return "next"
+
+            elif choice == "s":
                 self.manual_search(article=article)
-                return 'next'
+                return "next"
 
     # --- EXECUTION LOGIC (UPDATED FOR DUAL QUEUES) ---
 
@@ -168,37 +219,45 @@ class EditorialCLI:
             # 1. Update Proposal Statuses
             for p in all_props_for_article:
                 p_db = session.get(MergeProposalModel, p.id)
-                if p_db: # Ensure the proposal exists before updating
-                    p_db.status = 'approved' if p.id == selected_prop.id else 'rejected'
-            
+                if p_db:  # Ensure the proposal exists before updating
+                    p_db.status = "approved" if p.id == selected_prop.id else "rejected"
+
             article = session.get(ArticleModel, selected_prop.source_article_id)
             event = session.get(NewsEventModel, selected_prop.target_event_id)
 
             if not article or not event:
-                console.print("[red]Error: Source Article or Target Event not found in DB.[/red]")
+                console.print(
+                    "[red]Error: Source Article or Target Event not found in DB.[/red]"
+                )
                 return
-            
+
             # 2. Logic: Link Article to Event
-            self.cluster_service._link_to_event(session, event, article, article.embedding)
-            
+            self.cluster_service._link_to_event(
+                session, event, article, article.embedding
+            )
+
             # 3. Update ARTICLES Queue (Mark as Done or move to next stage if needed)
             # Assuming 'ENHANCER' logic applies to the EVENT, the article is now "processed"
             queue_item = session.execute(
-                select(ArticlesQueueModel).where(ArticlesQueueModel.article_id == article.id)
+                select(ArticlesQueueModel).where(
+                    ArticlesQueueModel.article_id == article.id
+                )
             ).scalar_one_or_none()
-            
+
             if queue_item:
-                # Move to ENHANCER if we want article-level enhancement, 
+                # Move to ENHANCER if we want article-level enhancement,
                 # OR mark COMPLETED if we rely on Event Enhancement.
                 # Let's assume we want to ensure the Event gets re-enhanced.
-                queue_item.status = JobStatus.COMPLETED 
-            
+                queue_item.status = JobStatus.COMPLETED
+
             # 4. Update EVENTS Queue (Trigger Re-Enhancement of the Event)
             # Check if event is already queued
             evt_queue = session.execute(
                 select(EventsQueueModel).where(
                     EventsQueueModel.event_id == event.id,
-                    EventsQueueModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
+                    EventsQueueModel.status.in_(
+                        [JobStatus.PENDING, JobStatus.PROCESSING]
+                    ),
                 )
             ).scalar_one_or_none()
 
@@ -210,7 +269,7 @@ class EditorialCLI:
                     queue_name=EventsQueueName.ENHANCER,
                     status=JobStatus.PENDING,
                     created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc)
+                    updated_at=datetime.now(timezone.utc),
                 )
                 session.add(new_job)
                 console.print("[dim]Triggered Event Re-Enhancement[/dim]")
@@ -223,15 +282,15 @@ class EditorialCLI:
         with SessionLocal() as session:
             for p in all_props:
                 p_db = session.get(MergeProposalModel, p.id)
-                p_db.status = 'rejected'
+                p_db.status = "rejected"
 
             article = session.get(ArticleModel, article_ref.id)
             if not article:
                 console.print("[red]Error: Article not found in DB.[/red]")
                 return
 
-            vec = article.embedding if article and article.embedding else [0.0]*768
-            
+            vec = article.embedding if article and article.embedding else [0.0] * 768
+
             # Create Event
             new_event_id = self.cluster_service._create_new_event(
                 session, article, vec, reason="Manual Decision"
@@ -239,9 +298,11 @@ class EditorialCLI:
 
             # Update Articles Queue
             queue_item = session.execute(
-                select(ArticlesQueueModel).where(ArticlesQueueModel.article_id == article.id)
+                select(ArticlesQueueModel).where(
+                    ArticlesQueueModel.article_id == article.id
+                )
             ).scalar_one_or_none()
-            
+
             if queue_item:
                 queue_item.status = JobStatus.COMPLETED
 
@@ -251,10 +312,10 @@ class EditorialCLI:
                 queue_name=EventsQueueName.ENHANCER,
                 status=JobStatus.PENDING,
                 created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc)
+                updated_at=datetime.now(timezone.utc),
             )
             session.add(new_job)
-            
+
             session.commit()
             console.print("[blue]🆕 New Event Created & Queued![/blue]")
             time.sleep(1)
@@ -264,62 +325,69 @@ class EditorialCLI:
     def manual_search(self, article=None):
         console.clear()
         console.rule("🔎 Manual Search")
-        
+
         with SessionLocal() as session:
             if not article:
                 query = Prompt.ask("Enter search query")
-                vector = [0.0] * 768 
+                vector = [0.0] * 768
             else:
                 console.print(f"Searching for: [cyan]{article.title}[/cyan]")
-                query = Prompt.ask("Refine Query", default=self.cluster_service.derive_search_query(article))
+                query = Prompt.ask(
+                    "Refine Query",
+                    default=self.cluster_service.derive_search_query(article),
+                )
                 vector = article.embedding
 
             results = self.cluster_service.search_news_events_hybrid(
                 session, query, vector, limit=10
             )
-            
+
             table = Table(title=f"Results for '{query}'")
             table.add_column("#")
             table.add_column("Event")
             table.add_column("RRF", justify="right")
             table.add_column("Dist", justify="right")
-            
+
             candidates = []
             for i, (event, rrf, dist) in enumerate(results):
                 candidates.append(event)
-                table.add_row(str(i+1), event.title, f"{rrf:.3f}", f"{dist:.3f}")
-            
+                table.add_row(str(i + 1), event.title, f"{rrf:.3f}", f"{dist:.3f}")
+
             console.print(table)
-            
+
             if article:
                 choice = Prompt.ask("Link to Event # (or Enter to cancel)")
                 if choice.isdigit() and 1 <= int(choice) <= len(candidates):
-                    target_event = candidates[int(choice)-1]
-                    
+                    target_event = candidates[int(choice) - 1]
+
                     # Reject existing proposals
                     session.execute(
                         update(MergeProposalModel)
                         .where(MergeProposalModel.source_article_id == article.id)
-                        .values(status='rejected')
+                        .values(status="rejected")
                     )
-                    
+
                     # Link
                     art_db = session.get(ArticleModel, article.id)
                     ev_db = session.get(NewsEventModel, target_event.id)
-                    
+
                     if not art_db or not ev_db:
-                        console.print("[red]Error: Article or Event not found in DB.[/red]")
+                        console.print(
+                            "[red]Error: Article or Event not found in DB.[/red]"
+                        )
                         return
-                    
-                    self.cluster_service._link_to_event(session, ev_db, art_db, art_db.embedding)
-                    
+
+                    self.cluster_service._link_to_event(
+                        session, ev_db, art_db, art_db.embedding
+                    )
+
                     # Update Articles Queue
                     session.execute(
                         update(ArticlesQueueModel)
                         .where(ArticlesQueueModel.article_id == article.id)
                         .values(status=JobStatus.COMPLETED)
                     )
-                    
+
                     # Trigger Event Enhancement
                     # (Simplified logic: always insert pending job)
                     new_job = EventsQueueModel(
@@ -327,7 +395,7 @@ class EditorialCLI:
                         queue_name=EventsQueueName.ENHANCER,
                         status=JobStatus.PENDING,
                         created_at=datetime.now(timezone.utc),
-                        updated_at=datetime.now(timezone.utc)
+                        updated_at=datetime.now(timezone.utc),
                     )
                     session.add(new_job)
 
@@ -341,18 +409,30 @@ class EditorialCLI:
         while True:
             console.clear()
             console.rule("🚑 Queue Manager")
-            
+
             with SessionLocal() as session:
                 # Articles Stats
-                a_stats = session.query(
-                    ArticlesQueueModel.queue_name, ArticlesQueueModel.status, func.count(ArticlesQueueModel.id)
-                ).group_by(ArticlesQueueModel.queue_name, ArticlesQueueModel.status).all()
-                
+                a_stats = (
+                    session.query(
+                        ArticlesQueueModel.queue_name,
+                        ArticlesQueueModel.status,
+                        func.count(ArticlesQueueModel.id),
+                    )
+                    .group_by(ArticlesQueueModel.queue_name, ArticlesQueueModel.status)
+                    .all()
+                )
+
                 # Events Stats
-                e_stats = session.query(
-                    EventsQueueModel.queue_name, EventsQueueModel.status, func.count(EventsQueueModel.id)
-                ).group_by(EventsQueueModel.queue_name, EventsQueueModel.status).all()
-                
+                e_stats = (
+                    session.query(
+                        EventsQueueModel.queue_name,
+                        EventsQueueModel.status,
+                        func.count(EventsQueueModel.id),
+                    )
+                    .group_by(EventsQueueModel.queue_name, EventsQueueModel.status)
+                    .all()
+                )
+
             table = Table(title="Articles Queue")
             table.add_column("Queue")
             table.add_column("Status")
@@ -370,33 +450,48 @@ class EditorialCLI:
                 color = "red" if s == JobStatus.FAILED else "green"
                 table2.add_row(q, f"[{color}]{s}[/{color}]", str(c))
             console.print(table2)
-            
+
             console.print("\n[r] Retry Failed   [c] Clear Completed   [b] Back")
             choice = Prompt.ask("Action")
-            
-            if choice == 'b': return
-            if choice == 'r':
+
+            if choice == "b":
+                return
+            if choice == "r":
                 with SessionLocal() as session:
                     # Retry both queues
                     res1 = session.execute(
-                        update(ArticlesQueueModel).where(ArticlesQueueModel.status == JobStatus.FAILED).values(status=JobStatus.PENDING, msg=None)
+                        update(ArticlesQueueModel)
+                        .where(ArticlesQueueModel.status == JobStatus.FAILED)
+                        .values(status=JobStatus.PENDING, msg=None)
                     )
                     res2 = session.execute(
-                        update(EventsQueueModel).where(EventsQueueModel.status == JobStatus.FAILED).values(status=JobStatus.PENDING, msg=None)
+                        update(EventsQueueModel)
+                        .where(EventsQueueModel.status == JobStatus.FAILED)
+                        .values(status=JobStatus.PENDING, msg=None)
                     )
                     session.commit()
-                    console.print(f"[green]Retried {res1.rowcount} Articles, {res2.rowcount} Events.[/green]")
+                    console.print(
+                        f"[green]Retried {res1.rowcount} Articles, {res2.rowcount} Events.[/green]"
+                    )
                     time.sleep(1)
-            if choice == 'c':
+            if choice == "c":
                 with SessionLocal() as session:
-                    session.execute(delete(ArticlesQueueModel).where(ArticlesQueueModel.status == JobStatus.COMPLETED))
-                    session.execute(delete(EventsQueueModel).where(EventsQueueModel.status == JobStatus.COMPLETED))
+                    session.execute(
+                        delete(ArticlesQueueModel).where(
+                            ArticlesQueueModel.status == JobStatus.COMPLETED
+                        )
+                    )
+                    session.execute(
+                        delete(EventsQueueModel).where(
+                            EventsQueueModel.status == JobStatus.COMPLETED
+                        )
+                    )
                     session.commit()
                     console.print(f"[green]Cleared completed jobs.[/green]")
                     time.sleep(1)
 
     # --- TOOLS ---
-    
+
     def inspect_tool(self):
         # Same logic as before, just ensuring imports work
         event_id_str = Prompt.ask("Enter Event UUID (or partial title search)")
@@ -405,57 +500,89 @@ class EditorialCLI:
                 event_id = uuid.UUID(event_id_str)
                 self._inspect_event_deep_dive(event_id)
             except:
-                events = session.query(NewsEventModel).filter(NewsEventModel.title.ilike(f"%{event_id_str}%")).limit(5).all()
+                events = (
+                    session.query(NewsEventModel)
+                    .filter(NewsEventModel.title.ilike(f"%{event_id_str}%"))
+                    .limit(5)
+                    .all()
+                )
                 if not events:
                     console.print("[red]No events found.[/red]")
                     time.sleep(2)
                     return
-                
+
                 table = Table(title="Search Results")
-                table.add_column("#"); table.add_column("Title"); table.add_column("ID")
+                table.add_column("#")
+                table.add_column("Title")
+                table.add_column("ID")
                 for i, e in enumerate(events):
-                    table.add_row(str(i+1), e.title, str(e.id))
+                    table.add_row(str(i + 1), e.title, str(e.id))
                 console.print(table)
                 sel = IntPrompt.ask("Select #", default=1)
-                self._inspect_event_deep_dive(events[sel-1].id)
+                self._inspect_event_deep_dive(events[sel - 1].id)
 
     def _inspect_event_deep_dive(self, event_id):
         while True:
             console.clear()
             with SessionLocal() as session:
-                event = session.query(NewsEventModel).options(
-                    joinedload(NewsEventModel.articles).joinedload(ArticleModel.contents)
-                ).get(event_id)
-                if not event: return
+                event = (
+                    session.query(NewsEventModel)
+                    .options(
+                        joinedload(NewsEventModel.articles).joinedload(
+                            ArticleModel.contents
+                        )
+                    )
+                    .get(event_id)
+                )
+                if not event:
+                    return
 
                 console.rule(f"[bold blue]EVENT INSPECTOR[/bold blue]")
                 console.print(f"[bold size=14]{event.title}[/bold size=14]")
                 console.print(f"ID: {event.id} | Articles: {len(event.articles)}")
-                
+
                 if event.summary:
                     sum_text = str(event.summary)
                     if isinstance(event.summary, dict):
-                        sum_text = event.summary.get('center', '') or event.summary.get('bias', '')
-                    console.print(Panel(sum_text, title="Summary", border_style="green"))
+                        sum_text = event.summary.get("center", "") or event.summary.get(
+                            "bias", ""
+                        )
+                    console.print(
+                        Panel(sum_text, title="Summary", border_style="green")
+                    )
 
                 table = Table(title="Linked Articles", show_header=True)
-                table.add_column("#", width=4); table.add_column("Title"); table.add_column("Date")
-                sorted_articles = sorted(event.articles, key=lambda x: x.published_date or datetime.min, reverse=True)
+                table.add_column("#", width=4)
+                table.add_column("Title")
+                table.add_column("Date")
+                sorted_articles = sorted(
+                    event.articles,
+                    key=lambda x: x.published_date or datetime.min,
+                    reverse=True,
+                )
                 for i, art in enumerate(sorted_articles):
-                    table.add_row(str(i+1), art.title, str(art.published_date.date() if art.published_date else '?'))
+                    table.add_row(
+                        str(i + 1),
+                        art.title,
+                        str(art.published_date.date() if art.published_date else "?"),
+                    )
                 console.print(table)
-                
-                console.print("\n[blue][#][/blue] Read Article   [green][b][/green] Back")
+
+                console.print(
+                    "\n[blue][#][/blue] Read Article   [green][b][/green] Back"
+                )
                 choice = Prompt.ask("Action").lower()
-                if choice == 'b': return
+                if choice == "b":
+                    return
                 if choice.isdigit() and 1 <= int(choice) <= len(sorted_articles):
-                    self._read_article_content(sorted_articles[int(choice)-1])
+                    self._read_article_content(sorted_articles[int(choice) - 1])
 
     def _read_article_content(self, article):
         console.clear()
         console.rule(f"Reading: {article.title}")
         console.print(f"[dim]{article.original_url}[/dim]\n")
-        if article.summary: console.print(Panel(article.summary, title="Summary"))
+        if article.summary:
+            console.print(Panel(article.summary, title="Summary"))
         content = article.contents[0].content if article.contents else "No content."
         console.print(Markdown(content))
         Prompt.ask("\nPress Enter...")
@@ -466,44 +593,72 @@ class EditorialCLI:
         console.rule("🔗 Find & Merge Duplicate Events")
         target_query = Prompt.ask("Search for the MAIN Event (Title)")
         with SessionLocal() as session:
-            targets = session.query(NewsEventModel).filter(
-                NewsEventModel.title.ilike(f"%{target_query}%"), NewsEventModel.is_active == True
-            ).limit(10).all()
+            targets = (
+                session.query(NewsEventModel)
+                .filter(
+                    NewsEventModel.title.ilike(f"%{target_query}%"),
+                    NewsEventModel.is_active == True,
+                )
+                .limit(10)
+                .all()
+            )
             if not targets:
                 console.print("[red]No events found.[/red]")
-                time.sleep(2); return
+                time.sleep(2)
+                return
 
-            table = Table(title="Select Target Event"); table.add_column("#"); table.add_column("Title")
-            for i, e in enumerate(targets): table.add_row(str(i+1), e.title)
+            table = Table(title="Select Target Event")
+            table.add_column("#")
+            table.add_column("Title")
+            for i, e in enumerate(targets):
+                table.add_row(str(i + 1), e.title)
             console.print(table)
             sel = IntPrompt.ask("Select #", default=1)
-            target_event = targets[sel-1]
-            
-            console.print(f"\n🔎 Searching duplicates for: [bold]{target_event.title}[/bold]...")
+            target_event = targets[sel - 1]
+
+            console.print(
+                f"\n🔎 Searching duplicates for: [bold]{target_event.title}[/bold]..."
+            )
             results = self.cluster_service.search_news_events_hybrid(
-                session, target_event.search_text or target_event.title, target_event.embedding_centroid, limit=20
+                session,
+                target_event.search_text or target_event.title,
+                target_event.embedding_centroid,
+                limit=20,
             )
             candidates = [r for r in results if r[0].id != target_event.id]
             if not candidates:
-                console.print("[green]No duplicates![/green]"); time.sleep(2); return
+                console.print("[green]No duplicates![/green]")
+                time.sleep(2)
+                return
 
-            table = Table(title="Potential Duplicates"); table.add_column("#"); table.add_column("Title"); table.add_column("Score")
+            table = Table(title="Potential Duplicates")
+            table.add_column("#")
+            table.add_column("Title")
+            table.add_column("Score")
             for i, (ev, rrf, dist) in enumerate(candidates):
-                table.add_row(str(i+1), ev.title, f"{rrf:.3f}")
+                table.add_row(str(i + 1), ev.title, f"{rrf:.3f}")
             console.print(table)
-            
+
             choice = Prompt.ask("Select to merge (e.g. '1,3') or 'all'")
             to_merge_indices = []
-            if choice == 'all': to_merge_indices = range(len(candidates))
+            if choice == "all":
+                to_merge_indices = range(len(candidates))
             else:
-                try: to_merge_indices = [int(x.strip())-1 for x in choice.split(',') if x.strip()]
-                except: return
+                try:
+                    to_merge_indices = [
+                        int(x.strip()) - 1 for x in choice.split(",") if x.strip()
+                    ]
+                except:
+                    return
 
-            if not to_merge_indices: return
+            if not to_merge_indices:
+                return
             if Confirm.ask(f"⚠️ Merge {len(to_merge_indices)} events?"):
                 for idx in to_merge_indices:
                     if 0 <= idx < len(candidates):
-                        self._execute_event_merge(session, candidates[idx][0], target_event)
+                        self._execute_event_merge(
+                            session, candidates[idx][0], target_event
+                        )
                 session.commit()
                 console.print("[green]Merged![/green]")
                 time.sleep(2)
@@ -514,14 +669,20 @@ class EditorialCLI:
             self.cluster_service._link_to_event(session, target_ev, art, art.embedding)
         source_ev.is_active = False
         source_ev.title = f"[MERGED] {source_ev.title}"
-        session.query(MergeProposalModel).filter(or_(MergeProposalModel.target_event_id == source_ev.id)).update({"status": "rejected"})
-        
+        session.query(MergeProposalModel).filter(
+            or_(MergeProposalModel.target_event_id == source_ev.id)
+        ).update({"status": "rejected"})
+
         # Trigger re-enhancement for target
         new_job = EventsQueueModel(
-            event_id=target_ev.id, queue_name=EventsQueueName.ENHANCER, status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc)
+            event_id=target_ev.id,
+            queue_name=EventsQueueName.ENHANCER,
+            status=JobStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
         session.add(new_job)
+
 
 if __name__ == "__main__":
     cli = EditorialCLI()

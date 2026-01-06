@@ -10,8 +10,8 @@ from sqlalchemy import create_engine
 from dataclasses import dataclass
 
 # Models
-from news_events_lib.models import NewsEventModel, ArticleModel, MergeProposalModel
-from models import ArticlesQueueModel, ArticlesQueueName, JobStatus, EventsQueueName
+from news_events_lib.models import NewsEventModel, ArticleModel, MergeProposalModel, JobStatus
+from models import ArticlesQueueModel, ArticlesQueueName, EventsQueueName
 from config import Settings
 
 # Defined here for clarity, but ideally belongs in models.py

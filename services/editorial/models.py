@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from news_events_lib.models import ArticleModel, BaseModel, NewsEventModel
+from news_events_lib.models import ArticleModel, BaseModel, NewsEventModel, JobStatus
 from sqlalchemy import (Column, DateTime, Enum, ForeignKey, Index, Integer,
                         String, Text)
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
@@ -19,11 +19,7 @@ class ClusterResult:
     candidates: List[dict] # For the CLI menu
     reason: str
     
-class JobStatus(enum.Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+
 
 class ArticlesQueueName(enum.Enum):
     FILTER = "filter"
