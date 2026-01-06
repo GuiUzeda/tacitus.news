@@ -132,12 +132,10 @@
     "description": "",
     "feeds": [
       {
-
         "url": "https://www.r7.com/arc/outboundfeeds/sitemap-news/?outputType=xml"
       }
     ]
-  }
-  ,
+  },
   {
     "name": "Jovem Pan",
     "bias": "right",
@@ -146,8 +144,56 @@
     "description": "",
     "feeds": [
       {
-
         "url": "https://jovempan.com.br/feed"
+      }
+    ]
+  },
+  {
+    "name": "Band",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "url": "https://api.bs.vibra.digital/api/v1/BandArticle?sort=-createdAt&limit=50&_channel=Band"
+      }
+    ]
+  },
+  {
+    "name": "Infomoney",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "url": "https://www.infomoney.com.br/news-sitemap.xml"
+      }
+    ]
+  },
+  {
+    "name": "O Povo",
+    "bias": "leans_left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "url": "https://www.opovo.com.br/sitemap-news-day.xml"
+      }
+    ]
+  },
+  {
+    "name": "Metrópoles",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "feeds": [
+      {
+        "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)",
+        "url": "https://www.metropoles.com/sitemap.xml"
       }
     ]
   }

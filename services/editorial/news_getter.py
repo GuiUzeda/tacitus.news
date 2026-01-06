@@ -52,7 +52,7 @@ class NewsGetter:
         self.base_headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept-Encoding": "gzip, deflate",
+            "Accept-Encoding": "gzip, deflate, brotli",
             "Referer": "https://www.google.com/",
             "Upgrade-Insecure-Requests": "1",
             "Sec-Fetch-Dest": "document",
@@ -69,7 +69,7 @@ class NewsGetter:
         try:
             self.nlp = spacy.load("pt_core_news_lg")
             # Disable components we don't need for speed (parser, lemmatizer)
-            self.nlp.disable_pipes(["parser", "lemmatizer", "textcat"])
+            self.nlp.disable_pipes(["parser", "lemmatizer"])
         except OSError:
             logger.error(
                 "SpaCy model 'pt_core_news_lg' not found. Run: python -m spacy download pt_core_news_lg"

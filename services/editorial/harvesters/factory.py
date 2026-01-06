@@ -1,7 +1,9 @@
+from .metropoles import MetropolesHarvester
 from .cartacapital import CartaCapitalHarvester
 from .poder360 import Poder360Harvester
 from .cnn import CNNHarvester
 from .base import BaseHarvester
+from .band import BandHarvester
 
 
 class HarvesterFactory:
@@ -11,6 +13,8 @@ class HarvesterFactory:
             "CNN Brasil": CNNHarvester(),
             "Poder 360": Poder360Harvester(),
             "CartaCapital": CartaCapitalHarvester(),
+            "Band": BandHarvester(),
+            "Metrópoles": MetropolesHarvester(),
             # Add "uol.com.br" here later IF they are weird.
         }
         self.generalist = BaseHarvester()
