@@ -386,9 +386,10 @@ class NewsCluster:
                 bias = article.newspaper.bias
                 bias_dist = dict(event.bias_distribution or {})
                 news_bias_dist = bias_dist.get(bias, set())
-                news_bias_dist.add(article.newspaper.name)
+                news_bias_dist.add(str(article.newspaper.id))
                 bias_dist[bias] = news_bias_dist
                 event.bias_distribution = bias_dist
+
 
             # Ownership Stats: {"Conglomerate": 1}
             if article.newspaper.ownership_type:
@@ -419,7 +420,7 @@ class NewsCluster:
         # Newspaper Metadata
         if article.newspaper:
             if article.newspaper.bias:
-                init_bias[article.newspaper.bias] = set(article.newspaper.name)
+                init_bias[article.newspaper.bias] = set(str(article.newspaper.id))
 
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
