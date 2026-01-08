@@ -53,7 +53,6 @@ class CloudNewsFilter:
         - Celebrity Gossip / Novelas / Reality Shows (BBB).
         - Horoscopes / Recipes / lifestyle tips.
         - Product Reviews (e.g., "Review of iPhone 16").
-        - "Generic" Crime (e.g., "Man arrested for robbery") -> UNLESS it involves a politician or organized crime (PCC/CV).
         
         **CRITICAL RULE:** If you are unsure, **INCLUDE IT**. It is better to have extra news than to miss a story.
         
