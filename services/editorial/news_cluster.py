@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime, timezone
 from typing import List, Optional
 from loguru import logger
-from sqlalchemy import select, func, text, and_, desc, update
+from sqlalchemy import select, func, and_, desc, update, or_
 from sqlalchemy.orm import Session, aliased, sessionmaker
 from sqlalchemy import create_engine
 from dataclasses import dataclass
@@ -25,7 +25,6 @@ from models import (
 from config import Settings
 
 
-# Defined here for clarity, but ideally belongs in models.py
 @dataclass
 class ClusterResult:
     action: str  # 'MERGE', 'PROPOSE', 'PROPOSE_MULTI', 'NEW'
@@ -45,6 +44,132 @@ class NewsCluster:
         self.SIMILARITY_STRICT = self.settings.similarity_strict
         self.SIMILARITY_LOOSE = self.settings.similarity_loose
 
+    # --- STANDARD ACTIONS (Used by CLI & Worker) ---
+
+    def execute_merge_action(self, session: Session, article: ArticleModel, event: NewsEventModel):
+        """
+        Standardizes the 'Merge' operation:
+        1. Links article to event (updating centroid).
+        2. Rejects conflicting proposals for this article.
+        3. Updates ArticlesQueue -> COMPLETED.
+        4. triggers EventsQueue -> ENHANCER.
+        """
+        # 1. Link
+        self._link_to_event(session, event, article, article.embedding)
+
+        # 2. Reject other proposals for this article
+        session.execute(
+            update(MergeProposalModel)
+            .where(
+                MergeProposalModel.source_article_id == article.id,
+                MergeProposalModel.target_event_id != event.id,
+                MergeProposalModel.status == "pending"
+            )
+            .values(status="rejected")
+        )
+        # Approve the specific proposal if it exists
+        session.execute(
+            update(MergeProposalModel)
+            .where(
+                MergeProposalModel.source_article_id == article.id,
+                MergeProposalModel.target_event_id == event.id
+            )
+            .values(status="approved")
+        )
+
+        # 3. Update Article Queue
+        self._mark_article_queue_completed(session, article.id)
+
+        # 4. Trigger Event Enhancement
+        self._trigger_event_enhancement(session, event.id)
+        
+        return event.id
+
+    def execute_new_event_action(self, session: Session, article: ArticleModel, reason: str = ""):
+        """
+        Standardizes the 'New Event' operation.
+        """
+        # 1. Create Event
+        # (Note: _create_new_event internally commits to reserve ID, so we re-fetch if needed)
+        new_event_id = self._create_new_event(session, article, article.embedding, reason)
+        
+        # 2. Reject ALL proposals for this article (since we made a new event)
+        session.execute(
+            update(MergeProposalModel)
+            .where(MergeProposalModel.source_article_id == article.id)
+            .values(status="rejected")
+        )
+
+        # 3. Update Article Queue
+        self._mark_article_queue_completed(session, article.id)
+
+        # 4. Trigger Event Enhancement
+        self._trigger_event_enhancement(session, new_event_id)
+        
+        return new_event_id
+
+    def execute_event_merge(self, session: Session, source_event: NewsEventModel, target_event: NewsEventModel):
+        """
+        Merges two events (Source -> Target).
+        1. Moves all articles.
+        2. Updates target centroid (simple average or re-calc).
+        3. Deactivates source event.
+        4. Triggers enhancer for target.
+        """
+        # Move articles
+        articles = session.scalars(
+            select(ArticleModel).where(ArticleModel.event_id == source_event.id)
+        ).all()
+        
+        for art in articles:
+            # We treat this like a new link to update centroids/search text
+            # Note: This might be heavy if merging massive events, but accurate.
+            self._link_to_event(session, target_event, art, art.embedding)
+
+        # Deactivate Source
+        source_event.is_active = False
+        source_event.title = f"[MERGED] {source_event.title}"
+        session.add(source_event)
+
+        # Reject proposals pointing to the dead event
+        session.execute(
+            update(MergeProposalModel)
+            .where(MergeProposalModel.target_event_id == source_event.id)
+            .values(status="rejected")
+        )
+
+        # Trigger Enhancement
+        self._trigger_event_enhancement(session, target_event.id)
+
+    # --- HELPERS ---
+
+    def _mark_article_queue_completed(self, session: Session, article_id: uuid.UUID):
+        session.execute(
+            update(ArticlesQueueModel)
+            .where(ArticlesQueueModel.article_id == article_id)
+            .values(status=JobStatus.COMPLETED, updated_at=datetime.now(timezone.utc))
+        )
+
+    def _trigger_event_enhancement(self, session: Session, event_id: uuid.UUID):
+        # Check if already pending/processing to avoid duplicate jobs
+        existing = session.scalar(
+            select(EventsQueueModel).where(
+                EventsQueueModel.event_id == event_id,
+                EventsQueueModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
+            )
+        )
+        if not existing:
+            new_job = EventsQueueModel(
+                event_id=event_id,
+                queue_name=EventsQueueName.ENHANCER,
+                status=JobStatus.PENDING,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            session.add(new_job)
+
+    # --- CORE SEARCH & LOGIC (Existing) ---
+
     def search_news_events_hybrid(
         self,
         session: Session,
@@ -53,9 +178,6 @@ class NewsCluster:
         limit: int = 10,
         rrf_k: int = 60,
     ):
-        """
-        Returns list of (NewsEventModel, rrf_score, vector_distance)
-        """
         # 1. Semantic Search CTE
         semantic_subq = (
             select(
@@ -78,7 +200,7 @@ class NewsCluster:
         )
 
         # 2. Keyword Search CTE
-        ts_query = func.plainto_tsquery("portuguese", query_text)
+        ts_query = func.websearch_to_tsquery("portuguese", query_text)
 
         keyword_subq = (
             select(
@@ -129,13 +251,11 @@ class NewsCluster:
         return session.execute(stmt).all()
 
     def derive_search_query(self, article: ArticleModel) -> str:
-        parts = []
+        parts = [article.title]
         if article.entities:
             parts.extend(article.entities[:5])
-        if article.main_topics and len(parts) < 3:
+        if article.main_topics and len(parts) < 5:
             parts.extend(article.main_topics[:2])
-        if not parts:
-            return article.title
         return " ".join(parts)
 
     def cluster_existing_article(
@@ -145,13 +265,13 @@ class NewsCluster:
         vector = article.embedding
 
         if vector is None or len(vector) == 0:
-            # Fallback if vector is missing (shouldn't happen with NewsGetter)
             return ClusterResult("ERROR", None, [], "Missing Vector")
 
         candidates = self.search_news_events_hybrid(session, text_query, vector)
 
-        # --- SCENARIO 0: NO CANDIDATES ---
         if not candidates:
+            # We still call internal create because we are in the middle of logic flow,
+            # but the RUN loop will call execute_new_event_action to finalize queues.
             new_id = self._create_new_event(
                 session, article, vector, reason="No Candidates Found"
             )
@@ -159,20 +279,17 @@ class NewsCluster:
 
         best_ev, rrf_score, vec_dist = candidates[0]
 
-        # --- SCENARIO 2: THE BUZZWORD TRAP (Keyword High, Vector Low) ---
         if vec_dist > self.SIMILARITY_LOOSE:
             reason = f"Vector Dist {vec_dist:.2f} too high (Buzzword Trap)"
             new_id = self._create_new_event(session, article, vector, reason=reason)
             return ClusterResult("NEW", new_id, [], reason)
 
-        # --- SCENARIO 4: THE EVOLUTION (Yellow Zone) ---
         if self.SIMILARITY_STRICT < vec_dist < self.SIMILARITY_LOOSE:
             self._create_proposal(session, article, best_ev, vec_dist)
             return ClusterResult(
                 "PROPOSE", best_ev.id, [], f"Yellow Zone ({vec_dist:.3f})"
             )
 
-        # --- AMBIGUITY CHECK (Safety Brake) ---
         if len(candidates) > 1:
             second_ev, _, second_dist = candidates[1]
             if (second_dist - vec_dist) < 0.05:
@@ -186,19 +303,16 @@ class NewsCluster:
 
                 return ClusterResult("PROPOSE_MULTI", None, options, "Ambiguous Match")
 
-        # --- SCENARIO 1: PERFECT MATCH ---
         self._link_to_event(session, best_ev, article, vector)
         return ClusterResult("MERGE", best_ev.id, [], "Perfect Match")
 
     def _link_to_event(
         self,
-        session,
+        session: Session,
         event: Optional[NewsEventModel],
         article: Optional[ArticleModel],
         vector: Optional[list[float]],
     ):
-        """Updates centroid and links article"""
-
         if event is None or article is None or vector is None:
             return None
 
@@ -215,10 +329,11 @@ class NewsCluster:
             event.search_text += f" {article.title}"
 
         article.event_id = event.id
+        session.add(event)
+        session.add(article)
         return event.id
 
     def _create_proposal(self, session, article, event, score, ambiguous=False):
-        # FIX: Added 'ambiguous' parameter
         exists = session.execute(
             select(MergeProposalModel).where(
                 and_(
@@ -246,8 +361,7 @@ class NewsCluster:
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
 
-    def _create_new_event(self, session, article, vector, reason=""):
-        # FIX: Added 'reason' parameter (mostly for logging)
+    def _create_new_event(self, session: Session, article, vector, reason=""):
         new_event = NewsEventModel(
             id=uuid.uuid4(),
             title=article.title,
@@ -259,9 +373,13 @@ class NewsCluster:
             search_text=f"{article.title} {self.derive_search_query(article)}",
         )
         session.add(new_event)
-        session.flush()
-
+        session.commit() # Immediate commit to reserve ID and make visible
+        
+        article = session.merge(article)
         article.event_id = new_event.id
+        session.add(article)
+        session.commit() 
+
         logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
         return new_event.id
 
@@ -296,53 +414,46 @@ class NewsCluster:
             with self.SessionLocal() as session:
                 for article, queue in result:
                     try:
-                        # Re-merge into new session
                         article = session.merge(article)
                         queue = session.merge(queue)
 
-                        # Get Decision Object
                         decision: ClusterResult = self.cluster_existing_article(
                             session, article
                         )
 
-                        # FIX: Handle the Enum-like Actions
                         if decision.action in ["MERGE", "NEW"]:
-                            # Success -> Move to Enhancer
-                            queue.status = JobStatus.COMPLETED
-                            queue.msg = f"Action {decision.action}: Linked to Event"
-                            new_events_queue_item = EventsQueueModel(
-                                event_id=decision.event_id,
-                                queue_name=EventsQueueName.ENHANCER,
-                                status=JobStatus.PENDING,
-                            )
-                            session.add(new_events_queue_item)
-                            # Note: We don't store event_id in queue, the Article model has it now.
-                            logger.success(
-                                f"Action {decision.action}: {article.title[:20]} -> ENHANCE"
-                            )
+                            # Use helper methods to finalize queues
+                            # Note: decision.event_id is already set by the internal methods
+                            self._mark_article_queue_completed(session, article.id)
+                            if decision.event_id:
+                                self._trigger_event_enhancement(session, decision.event_id)
+                            
+                            logger.success(f"Action {decision.action}: {article.title[:20]} -> ENHANCE")
 
                         elif decision.action in ["PROPOSE", "PROPOSE_MULTI"]:
-                            # Parked -> Waiting for Admin CLI
                             queue.status = JobStatus.COMPLETED
                             queue.msg = f"Parked: {decision.reason}"
-                            logger.warning(
-                                f"Action {decision.action}: {article.title[:20]} -> PARKED"
-                            )
+                            logger.warning(f"Action {decision.action}: {article.title[:20]} -> PARKED")
 
                         else:
-                            # Fallback Error
                             queue.status = JobStatus.FAILED
                             queue.msg = f"Unknown Action: {decision.action}"
 
                         queue.updated_at = datetime.now(timezone.utc)
+                        session.commit()
 
                     except Exception as e:
-                        logger.error(f"Cluster failed: {e}")
-                        queue.status = JobStatus.FAILED
-                        queue.msg = str(e)
+                        logger.error(f"Cluster failed for {getattr(article, 'title', 'Unknown')}: {e}")
+                        session.rollback()
+                        try:
+                            queue = session.merge(queue)
+                            queue.status = JobStatus.FAILED
+                            queue.msg = str(e)
+                            session.commit()
+                        except:
+                            pass
 
-                session.commit()
-                logger.success(f"Processed {len(result)} articles.")
+                logger.success(f"Processed batch of {len(result)} articles.")
 
 
 if __name__ == "__main__":

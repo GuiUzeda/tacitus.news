@@ -15,6 +15,6 @@ class Settings(BaseSettings):
     domains: set[str] = {"localhost"}
     gemini_api_key: str = ""
     script_dir: Path = script_dir
-    similarity_strict: float = 0.20
-    similarity_loose: float = 0.35
+    similarity_strict: float = 0.08
+    similarity_loose: float = 0.15
     
