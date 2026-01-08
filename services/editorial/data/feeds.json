@@ -34,7 +34,7 @@
     "feeds": [
       {
         "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/)",
-        "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap/latest/?outputType=xml"
+        "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap-index-by-day/?outputType=xml"
       }
     ]
   },
@@ -132,7 +132,7 @@
     "description": "",
     "feeds": [
       {
-        "url": "https://www.r7.com/arc/outboundfeeds/sitemap-news/?outputType=xml"
+        "url": "https://www.r7.com/arc/outboundfeeds/sitemap/latest/"
       }
     ]
   },

@@ -1,34 +1,28 @@
-from functools import partial
-import re
-from datetime import datetime, timedelta
-from typing import Optional
-
-from bs4 import BeautifulSoup
 from .base import BaseHarvester
-from loguru import logger
-import feedparser
+from functools import partial
+from datetime import timedelta
 
-
-class JovemPanHarvester(BaseHarvester):
+class MetropolesHarvester(BaseHarvester):
     def __init__(
         self,
         cutoff: timedelta = timedelta(hours=24),
     ):
         super().__init__(cutoff)
-
-    async def harvest(self, session, sources) -> list[dict]:
-
+    async def harvest(self, session, sources)-> list[dict]:
         url_harvesters = {
-            "https://jovempan.com.br/feed": partial(
-                self.harvest_rss,
+            "https://www.metropoles.com/sitemap.xml": partial(
+                self.harvest_latest_date,
+                date_pattern=r"https://www\.metropoles\.com/sitemap/noticias-(\d{4}-\d{2}-\d{2})\.xml",
             ),
         }
+
+
         articles = []
         for source in sources:
             harvester = url_harvesters.get(source["url"], super()._fetch)
             articles.extend(
                 await harvester(
-                    session= session,
+                    session=session,
                     url=source["url"],
                     blocklist=source["blocklist"],
                     allowed_sections=source["allowed_sections"],

@@ -15,9 +15,7 @@ class Poder360Harvester(BaseHarvester):
     ):
         super().__init__(cutoff)
 
-    async def harvest(
-        self, session, sources
-    ) -> list[dict]:
+    async def harvest(self, session, sources) -> list[dict]:
 
         url_harvesters = {
             "https://www.poder360.com.br/sitemap_index.xml": partial(
@@ -25,8 +23,15 @@ class Poder360Harvester(BaseHarvester):
                 id_pattern=r"https://www\.poder360\.com\.br/post-sitemap(\d*)\.xml",
             ),
         }
-        articles =[]
+        articles = []
         for source in sources:
             harvester = url_harvesters.get(source["url"], super()._fetch)
-            articles.extend(await harvester(session, source["url"], blocklist=source["blocklist"], allowed_sections=source["allowed_sections"]))
+            articles.extend(
+                await harvester(
+                    session,
+                    source["url"],
+                    blocklist=source["blocklist"],
+                    allowed_sections=source["allowed_sections"],
+                )
+            )
         return articles

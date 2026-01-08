@@ -206,7 +206,9 @@ class NewsGetter:
                         ]
                     content = extracted_json.get("raw_text", "")
                     if not entities:
-                        entities = self.extract_fast_entities(content)
+                        entities = await asyncio.to_thread(self.extract_fast_entities, content) 
+                    embedding = await asyncio.to_thread(self.calculate_vector, content)
+                        
 
                     return {
                         "title": extracted_json.get("title"),
@@ -220,6 +222,7 @@ class NewsGetter:
                         "content": content,
                         "newspaper_id": newspaper_id,
                         "entities": entities,
+                        "embedding": embedding
                     }
                 return []
             except Exception as e:
@@ -237,7 +240,7 @@ class NewsGetter:
         for attempt in range(retries):
             try:
                 async with http_session.get(
-                    url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=10)
+                    url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=40)
                 ) as response:
                     response.raise_for_status()
                     return await response.text()
@@ -271,6 +274,7 @@ class NewsGetter:
                     original_url=article_data["link"],
                     url_hash=article_data["hash"],
                     summary=article_data["summary"],
+                    summary_date=dt_object,
                     published_date=dt_object,
                     newspaper_id=article_data["newspaper_id"],
                     authors=[],
@@ -281,16 +285,16 @@ class NewsGetter:
                     main_topics=None,
                     entities=article_data["entities"],
                     key_points=None,
-                    embedding=self.calculate_vector(article_data["content"]),
+                    embedding=article_data["embedding"],
                 )
 
                 session.add(article)
                 session.flush()  # Force SQL generation to catch constraints
                 return article
 
-        except IntegrityError:
+        except IntegrityError as e:
             # Log unique violations as warnings, ignore them
-            logger.warning(f"Skipping duplicate: {article_data['title'][:30]}...")
+            logger.warning(f"Skipping duplicate: {article_data['title'][:30]}... {e}")
             return None
         except Exception as e:
             logger.error(f"Failed to save article {article_data['title'][:30]}: {e}")
@@ -311,7 +315,7 @@ class NewsGetter:
                     article_id=article.id,
                     estimated_tokens=tokens,
                     status=JobStatus.PENDING,
-                    queuename=ArticlesQueueName.FILTER,
+                    queue_name=ArticlesQueueName.FILTER,
                 )
                 .on_conflict_do_nothing(index_elements=["article_id"])
             )
@@ -327,6 +331,7 @@ class NewsGetter:
     ):
 
         newspapers = await self._get_newspapers()
+        logger.info(f"Found {len(newspapers)} newspapers.")
         with self.SessionLocal() as session:
             async with aiohttp.ClientSession(headers=self.headers) as http_session:
 
@@ -382,7 +387,7 @@ class NewsGetter:
             return [0.0] * 768
 
     async def _get_newspapers(self) -> List[dict]:
-        week_ago = datetime.now() - timedelta(days=7)
+        three_months = datetime.now() - timedelta(days=90)
         with self.SessionLocal() as session:
             stmt = (
                 select(NewspaperModel)
@@ -410,7 +415,7 @@ class NewsGetter:
                 ArticleModel.newspaper_id, ArticleModel.url_hash
             ).where(
                 ArticleModel.newspaper_id.in_(newspaper_ids),
-                ArticleModel.published_date >= week_ago,
+                ArticleModel.published_date >= three_months,
             )
             all_hashes = session.execute(hashes_stmt).all()
             hashes_map = {nid: set() for nid in newspaper_ids}

@@ -28,13 +28,18 @@ def seed_newspapers_feeds(feeds_data):
                 description=newspaper_data["description"],
             )
             
-            # 2. Create Newspaper DB Model
-            # We use model_dump() (Pydantic v2) to unpack schema fields into the model
-            newspaper_model = NewspaperModel(**newspaper_schema.model_dump())
-            session.add(newspaper_model)
+            # 2. Create or Update Newspaper DB Model
+            newspaper_model = session.query(NewspaperModel).filter(NewspaperModel.name == newspaper_schema.name).first()
+            if newspaper_model:
+                for key, value in newspaper_schema.model_dump().items():
+                    setattr(newspaper_model, key, value)
+            else:
+                newspaper_model = NewspaperModel(**newspaper_schema.model_dump())
+                session.add(newspaper_model)
+
             session.flush()  # Flush to generate the ID for the newspaper so we can use it for feeds
 
-            # 3. Create Feeds linked to the Newspaper
+            # 3. Create or Update Feeds linked to the Newspaper
             for feed_data in newspaper_data.get("feeds", []):
                 feed_schema = FeedCreateSchema(
                     url=feed_data["url"],
@@ -42,8 +47,14 @@ def seed_newspapers_feeds(feeds_data):
                     blocklist=feed_data.get("blocklist"),
                     allowed_sections=feed_data.get("allowed_sections"),
                 )
-                feed_model = FeedModel(**feed_schema.model_dump())
-                session.add(feed_model)
+                
+                feed_model = session.query(FeedModel).filter(FeedModel.url == feed_schema.url).first()
+                if feed_model:
+                    for key, value in feed_schema.model_dump().items():
+                        setattr(feed_model, key, value)
+                else:
+                    feed_model = FeedModel(**feed_schema.model_dump())
+                    session.add(feed_model)
         
         session.commit()
         print("Seeding completed successfully.")

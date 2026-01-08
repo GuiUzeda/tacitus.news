@@ -15,9 +15,7 @@ class CartaCapitalHarvester(BaseHarvester):
     ):
         super().__init__(cutoff)
 
-    async def harvest(
-        self, session, sources
-    ) -> list[dict]:
+    async def harvest(self, session, sources) -> list[dict]:
 
         url_harvesters = {
             "https://www.cartacapital.com.br/sitemap_index.xml": partial(
@@ -25,8 +23,15 @@ class CartaCapitalHarvester(BaseHarvester):
                 id_pattern=r"https://www\.cartacapital\.com\.br/post-sitemap(\d*)\.xml",
             ),
         }
-        articles =[]
+        articles = []
         for source in sources:
             harvester = url_harvesters.get(source["url"], super()._fetch)
-            articles.extend(await harvester(session, source["url"], source["blocklist"], source["allowed_sections"]))
+            articles.extend(
+                await harvester(
+                    session=session,
+                    url=source["url"],
+                    blocklist=source["blocklist"],
+                    allowed_sections=source["allowed_sections"],
+                )
+            )
         return articles

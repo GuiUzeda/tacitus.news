@@ -20,7 +20,7 @@ class BaseHarvester:
         # )
 
         self.blocklist: str = (
-            r"(login|search|autor|tag|gallery|esporte|futebol|bbb|horoscopo|gastronomia|patrocinado|publicidade|quiz|ilustrada|podcast|web-stories)"
+            r"(login|search|tag|gallery|/esporte/|futebol|bbb|horoscopo|gastronomia|patrocinado|publicidade|quiz|ilustrada|podcast|web-stories|/live/)"
         )
         # Only accept news from the last 24h (Crucial for Indexes)
         self.cutoff_date = datetime.now(timezone.utc) - cutoff
@@ -107,7 +107,7 @@ class BaseHarvester:
     ) -> list[dict]:
         try:
             async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=10), headers=self.headers
+                url, timeout=aiohttp.ClientTimeout(total=120), headers=self.headers
             ) as response:
                 if response.status != 200:
                     logger.error(f"Response Error {url}: {response.status}")
@@ -141,6 +141,7 @@ class BaseHarvester:
             # 2. Date Check (If available)
             # Google News Sitemaps use <news:publication_date>
             news = u.find("news:news")
+            lastmod = u.find("lastmod")
             pub_date = None
             if news:
                 pdate = news.find("news:publication_date")
@@ -157,7 +158,7 @@ class BaseHarvester:
                     "title": "Unknown",  # Trafilatura will fix this later
                     "link": link,
                     "source": base_domain,
-                    "published": pub_date,
+                    "published": pub_date or lastmod.text if lastmod else None,
                     "content": "Unknown",  # Trafilatura will fix this later
                 }
             )
@@ -182,7 +183,7 @@ class BaseHarvester:
         """
         try:
             async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=10), headers=self.headers
+                url, timeout=aiohttp.ClientTimeout(total=120), headers=self.headers
             ) as response:
                 if response.status != 200:
                     logger.error(f"RSS Error {url}: {response.status}")
@@ -271,3 +272,51 @@ class BaseHarvester:
                 filtered.append(art)
 
         return filtered
+
+    async def harvest_latest_date(self, session, url , date_pattern,blocklist=None, allowed_sections=None):
+        """
+        Fetches the Metropoles sitemap index and finds the URL for the latest date.
+        Pattern: .../noticias-YYYY-MM-DD.xml
+        """
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    logger.warning(f"Metropoles Index fail {url}: {response.status}")
+                    return  []
+                xml_content = await response.read()
+        except Exception as e:
+            logger.warning(f"Metropoles Connection fail {url}: {e}")
+            return []
+
+        soup = BeautifulSoup(xml_content, "xml")
+        maps = soup.find_all("sitemap")
+        
+
+        date_pattern = re.compile(date_pattern)
+
+        valid_locs = []
+        for m in maps:
+            loc_tag = m.find("loc")
+            if not loc_tag:
+                continue
+
+            loc_url = loc_tag.text.strip()
+            match = date_pattern.search(loc_url)
+
+            if match:
+                date_str = match.group(1)
+                # We store (DATE_STRING, FULL_URL)
+                # ISO Format (YYYY-MM-DD) sorts correctly as a string, no need to parse to datetime object
+                valid_locs.append((date_str, loc_url))
+
+        if not valid_locs:
+            logger.warning(f"No daily sitemaps found in {url}")
+            return []
+
+        # Sort Descending (2026-01-06 > 2026-01-05)
+        valid_locs.sort(key=lambda x: x[0], reverse=True)
+        
+        latest_date, best_url = valid_locs[0]
+        logger.info(f"📍 Latest sitemap: {latest_date} -> {best_url}")
+        
+        return await self._fetch(session, best_url, blocklist, allowed_sections)
