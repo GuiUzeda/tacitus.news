@@ -73,17 +73,18 @@ class NewsEventModel(BaseModel):
         nullable=True,
         comment='Structure: {"left": "markdown", "right": "markdown", "center": "markdown"}',
     )
-    interest_counts: Mapped[Optional[List[str]]] = mapped_column(
-        ARRAY(Text), default=dict, nullable=True
-    )
     # interests are entities with classification
     # {
     #   "person": {"Macron": 5, "Scholz": 3, "Biden": 1},
     #   "place": {"Paris": 5},
     #   "topic": {"Defense Budget": 4}
     # }
-    ownership_stats: Mapped[Optional[dict[str, dict[str, int]]]] = mapped_column(
-        JSONB, default=lambda: {}
+    interest_counts: Mapped[Optional[List[str]]] = mapped_column(
+        JSONB, default=dict, nullable=True
+    )
+    # {"Conglomerate": 0, "Independent": 0, "State": 0}
+    ownership_stats: Mapped[Optional[dict[str, int]]] = mapped_column(
+        JSONB, default=dict, nullable=True
     )
     article_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -102,8 +103,9 @@ class NewsEventModel(BaseModel):
     # 3-9 = Highlights
     # 10 = Standard Feed (Default)
     fe_priority: Mapped[int] = mapped_column(Integer, default=10)
-
+    # { "left": 10, "center": 5, "right": 2 }
     bias_distribution: Mapped[dict[str, int]] = mapped_column(JSONB, default=dict)
+    # {"positive": 0, "negative": 0, "neutral": 0, "avg": 0}
     stance_distribution: Mapped[dict[str, dict[str, int]]] = mapped_column(
         JSONB, default=dict
     )
@@ -173,16 +175,16 @@ class ArticleModel(BaseModel):
     stance_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     main_topics: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
     # Interest/tags
-    entities: Mapped[Optional[List[str]]] = mapped_column(
-        ARRAY(Text), default=dict, nullable=True
-    )
+    entities: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
     # interests are entities with classification
     # {
     #   "person": ["Macron", "Scholz"],
     #   "place": ["Paris", "Berlin"],
     #   "topic": ["Defense Budget", "NATO"]
     # }
-    interests: Mapped[Optional[JSONB]] = mapped_column(JSONB, nullable=True)
+    interests: Mapped[Optional[JSONB]] = mapped_column(
+        JSONB, default=dict, nullable=True
+    )
 
     # up to 5 point bullet summary
     key_points: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)

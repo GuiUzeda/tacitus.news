@@ -107,6 +107,7 @@ class NewsGetter:
         doc = self.nlp(text[:50000]) 
         
         entities = []
+        interests = {}
         seen = set()
         
         # Prioritize these labels
@@ -114,9 +115,18 @@ class NewsGetter:
         
         for ent in doc.ents:
             clean_text = ent.text.strip()
+            if len(clean_text) < 2 or clean_text.lower()  in seen:
+                continue
             # Basic filter: remove short noise and duplicates
-            if ent.label_ in target_labels and len(clean_text) > 2 and clean_text.lower() not in seen:
+            if ent.label_ in target_labels:
                 entities.append(clean_text)
+                if ent.label == "PER":
+                    interests['person'] = interests.get("person",[]) + [clean_text]
+                elif ent.label == "ORG":
+                    interests['organization'] = interests.get("organization",[]) + [clean_text]
+                else:
+                    interests['topic'] = interests.get("topic",[]) + [clean_text]
+
                 seen.add(clean_text.lower())
                 
         # Return top 10 most relevant-looking entities

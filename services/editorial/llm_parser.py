@@ -154,7 +154,7 @@ class CloudNewsAnalyzer:
                 "Fact-dense sentence 3...",
                 "Fact-dense sentence 4..."
             ],
-            "stance": "critical" | "supportive" | "neutral",
+            "stance": "Ranges from -1.0 (critical) to 1.0 (supportive) 0.0 being neutral",
             "stance_reasoning": "Short markdown reasoning for the stace",
             "entities": ["List", "of", "Key", "People/Orgs"],
             "main_topics": ["Reforma Fiscal", "Infalação", etc]
