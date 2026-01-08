@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from loguru import logger
 from sqlalchemy import select, func, and_, desc, update, or_
@@ -16,6 +16,7 @@ from news_events_lib.models import (
     MergeProposalModel,
     JobStatus,
 )
+from torch import diff
 from models import (
     ArticlesQueueModel,
     ArticlesQueueName,
@@ -46,7 +47,9 @@ class NewsCluster:
 
     # --- STANDARD ACTIONS (Used by CLI & Worker) ---
 
-    def execute_merge_action(self, session: Session, article: ArticleModel, event: NewsEventModel):
+    def execute_merge_action(
+        self, session: Session, article: ArticleModel, event: NewsEventModel
+    ):
         """
         Standardizes the 'Merge' operation:
         1. Links article to event (updating centroid).
@@ -63,7 +66,7 @@ class NewsCluster:
             .where(
                 MergeProposalModel.source_article_id == article.id,
                 MergeProposalModel.target_event_id != event.id,
-                MergeProposalModel.status == "pending"
+                MergeProposalModel.status == "pending",
             )
             .values(status="rejected")
         )
@@ -72,7 +75,7 @@ class NewsCluster:
             update(MergeProposalModel)
             .where(
                 MergeProposalModel.source_article_id == article.id,
-                MergeProposalModel.target_event_id == event.id
+                MergeProposalModel.target_event_id == event.id,
             )
             .values(status="approved")
         )
@@ -82,17 +85,21 @@ class NewsCluster:
 
         # 4. Trigger Event Enhancement
         self._trigger_event_enhancement(session, event.id)
-        
+
         return event.id
 
-    def execute_new_event_action(self, session: Session, article: ArticleModel, reason: str = ""):
+    def execute_new_event_action(
+        self, session: Session, article: ArticleModel, reason: str = ""
+    ):
         """
         Standardizes the 'New Event' operation.
         """
         # 1. Create Event
         # (Note: _create_new_event internally commits to reserve ID, so we re-fetch if needed)
-        new_event_id = self._create_new_event(session, article, article.embedding, reason)
-        
+        new_event_id = self._create_new_event(
+            session, article, article.embedding, reason
+        )
+
         # 2. Reject ALL proposals for this article (since we made a new event)
         session.execute(
             update(MergeProposalModel)
@@ -105,10 +112,15 @@ class NewsCluster:
 
         # 4. Trigger Event Enhancement
         self._trigger_event_enhancement(session, new_event_id)
-        
+
         return new_event_id
 
-    def execute_event_merge(self, session: Session, source_event: NewsEventModel, target_event: NewsEventModel):
+    def execute_event_merge(
+        self,
+        session: Session,
+        source_event: NewsEventModel,
+        target_event: NewsEventModel,
+    ):
         """
         Merges two events (Source -> Target).
         1. Moves all articles.
@@ -120,7 +132,7 @@ class NewsCluster:
         articles = session.scalars(
             select(ArticleModel).where(ArticleModel.event_id == source_event.id)
         ).all()
-        
+
         for art in articles:
             # We treat this like a new link to update centroids/search text
             # Note: This might be heavy if merging massive events, but accurate.
@@ -155,7 +167,7 @@ class NewsCluster:
         existing = session.scalar(
             select(EventsQueueModel).where(
                 EventsQueueModel.event_id == event_id,
-                EventsQueueModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
+                EventsQueueModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
             )
         )
         if not existing:
@@ -175,6 +187,8 @@ class NewsCluster:
         session: Session,
         query_text: str,
         query_vector: List[float],
+        target_date: Optional[datetime] = datetime.now(timezone.utc),
+        diff_date: Optional[timedelta] = timedelta(days=5),
         limit: int = 10,
         rrf_k: int = 60,
     ):
@@ -196,8 +210,16 @@ class NewsCluster:
             .where(NewsEventModel.is_active == True)
             .order_by(NewsEventModel.embedding_centroid.cosine_distance(query_vector))
             .limit(50)
-            .cte("semantic_results")
         )
+
+        if target_date and diff_date:
+            semantic_subq = semantic_subq.where(
+                and_(
+                    NewsEventModel.created_at >= target_date - diff_date,
+                    NewsEventModel.created_at <= target_date,
+                )
+            )
+        semantic_subq = semantic_subq.cte("semantic_results")
 
         # 2. Keyword Search CTE
         ts_query = func.websearch_to_tsquery("portuguese", query_text)
@@ -220,8 +242,16 @@ class NewsCluster:
                 )
             )
             .limit(50)
-            .cte("keyword_results")
         )
+
+        if target_date and diff_date:
+            keyword_subq = keyword_subq.where(
+                and_(
+                    NewsEventModel.created_at >= target_date - diff_date,
+                    NewsEventModel.created_at <= target_date,
+                )
+            )
+        keyword_subq = keyword_subq.cte("keyword_results")
 
         # 3. RRF Calculation
         sem_alias = aliased(semantic_subq, name="sem")
@@ -267,7 +297,9 @@ class NewsCluster:
         if vector is None or len(vector) == 0:
             return ClusterResult("ERROR", None, [], "Missing Vector")
 
-        candidates = self.search_news_events_hybrid(session, text_query, vector)
+        candidates = self.search_news_events_hybrid(
+            session, text_query, vector, article.published_date
+        )
 
         if not candidates:
             # We still call internal create because we are in the middle of logic flow,
@@ -334,14 +366,16 @@ class NewsCluster:
         if article.interests:
             # Create a copy to ensure SQLAlchemy detects the JSON mutation
             current_counts = dict(event.interest_counts or {})
-            
+
             for category, items in article.interests.items():
                 if category not in current_counts:
                     current_counts[category] = {}
-                
+
                 for item in items:
-                    current_counts[category][item] = current_counts[category].get(item, 0) + 1
-            
+                    current_counts[category][item] = (
+                        current_counts[category].get(item, 0) + 1
+                    )
+
             event.interest_counts = current_counts
 
         # 3. Aggregate Newspaper Metadata
@@ -353,15 +387,13 @@ class NewsCluster:
                 bias_dist = dict(event.bias_distribution or {})
                 bias_dist[bias] = bias_dist.get(bias, 0) + 1
                 event.bias_distribution = bias_dist
-            
+
             # Ownership Stats: {"Conglomerate": 1}
             if article.newspaper.ownership_type:
                 otype = article.newspaper.ownership_type
                 own_stats = dict(event.ownership_stats or {})
                 own_stats[otype] = own_stats.get(otype, 0) + 1
                 event.ownership_stats = own_stats
-
-
 
         # 5. Link
         article.event_id = event.id
@@ -375,22 +407,20 @@ class NewsCluster:
         init_bias = {}
         init_ownership = {}
 
-
         # Interests
         if article.interests:
             for category, items in article.interests.items():
                 init_interests[category] = {}
                 for item in items:
                     init_interests[category][item] = 1
-        
+
         # Newspaper Metadata
         if article.newspaper:
             if article.newspaper.bias:
                 init_bias[article.newspaper.bias] = 1
-            
+
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
-
 
         # 2. Create Event
         new_event = NewsEventModel(
@@ -408,16 +438,17 @@ class NewsCluster:
             ownership_stats=init_ownership,
         )
         session.add(new_event)
-        session.commit() # Immediate commit to reserve ID
-        
+        session.commit()  # Immediate commit to reserve ID
+
         # 3. Link Article
         article = session.merge(article)
         article.event_id = new_event.id
         session.add(article)
-        session.commit() 
+        session.commit()
 
         logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
         return new_event.id
+
     def _create_proposal(self, session, article, event, score, ambiguous=False):
         exists = session.execute(
             select(MergeProposalModel).where(
@@ -445,8 +476,6 @@ class NewsCluster:
             logger.info(
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
-
-
 
     async def run(self):
         while True:
@@ -491,14 +520,20 @@ class NewsCluster:
                             # Note: decision.event_id is already set by the internal methods
                             self._mark_article_queue_completed(session, article.id)
                             if decision.event_id:
-                                self._trigger_event_enhancement(session, decision.event_id)
-                            
-                            logger.success(f"Action {decision.action}: {article.title[:20]} -> ENHANCE")
+                                self._trigger_event_enhancement(
+                                    session, decision.event_id
+                                )
+
+                            logger.success(
+                                f"Action {decision.action}: {article.title[:20]} -> ENHANCE"
+                            )
 
                         elif decision.action in ["PROPOSE", "PROPOSE_MULTI"]:
                             queue.status = JobStatus.COMPLETED
                             queue.msg = f"Parked: {decision.reason}"
-                            logger.warning(f"Action {decision.action}: {article.title[:20]} -> PARKED")
+                            logger.warning(
+                                f"Action {decision.action}: {article.title[:20]} -> PARKED"
+                            )
 
                         else:
                             queue.status = JobStatus.FAILED
@@ -508,7 +543,9 @@ class NewsCluster:
                         session.commit()
 
                     except Exception as e:
-                        logger.error(f"Cluster failed for {getattr(article, 'title', 'Unknown')}: {e}")
+                        logger.error(
+                            f"Cluster failed for {getattr(article, 'title', 'Unknown')}: {e}"
+                        )
                         session.rollback()
                         try:
                             queue = session.merge(queue)

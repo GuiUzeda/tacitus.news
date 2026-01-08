@@ -114,7 +114,7 @@ class EditorialCLI:
                 f"[link={article.original_url}]{article.original_url}[/link]", 
                 style="blue underline", no_wrap=True, overflow="ignore"
             )
-            
+            console.print(article.published_date.strftime("%Y-%m-%d") if article.published_date else "No date")
             console.print(Panel(textwrap.shorten(article.summary or "No summary", width=200)))
             if article.entities:
                 console.print(f"[yellow]Entities:[/yellow] {', '.join(article.entities)}")
@@ -124,6 +124,7 @@ class EditorialCLI:
             table.add_column("Event Title")
             table.add_column("Score", justify="right")
             table.add_column("Reason")
+            table.add_column("Date")
 
             for i, p in enumerate(props):
                 score_color = "green" if p.similarity_score < 0.15 else "yellow"
@@ -132,6 +133,7 @@ class EditorialCLI:
                     p.target_event.title if p.target_event else "Unknown",
                     f"[{score_color}]{p.similarity_score:.3f}[/{score_color}]",
                     p.reasoning,
+                    p.target_event.created_at.strftime("%Y-%m-%d") if p.target_event else "-",
                 )
             console.print(table)
             

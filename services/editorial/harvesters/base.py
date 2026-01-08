@@ -142,6 +142,8 @@ class BaseHarvester:
             # Google News Sitemaps use <news:publication_date>
             news = u.find("news:news")
             lastmod = u.find("lastmod")
+            url_date = re.match(r"\d{4}-\d{2}-\d{2}|\d{4}/\d{2}/\d{2}|", link)
+
             pub_date = None
             if news:
                 pdate = news.find("news:publication_date")
@@ -158,7 +160,7 @@ class BaseHarvester:
                     "title": "Unknown",  # Trafilatura will fix this later
                     "link": link,
                     "source": base_domain,
-                    "published": pub_date or lastmod.text if lastmod else None,
+                    "published": pub_date or url_date if url_date else lastmod.text if lastmod else None,
                     "content": "Unknown",  # Trafilatura will fix this later
                 }
             )
