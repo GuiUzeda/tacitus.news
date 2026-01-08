@@ -49,12 +49,11 @@ class CloudNewsFilter:
         - **Security and crimes:** Public Security, Crimes
         
         **EXCLUDE (Strict Blocklist):**
-        - Sports Results / Football Games.
+        - Sports Results / Football Games / Sports teams.
         - Celebrity Gossip / Novelas / Reality Shows (BBB).
         - Horoscopes / Recipes / lifestyle tips.
-        - Product Reviews (e.g., "Review of iPhone 16").
-        
-        **CRITICAL RULE:** If you are unsure, **INCLUDE IT**. It is better to have extra news than to miss a story.
+        - Product Reviews (e.g., "Review of iPhone 16"), including cars
+        - Weather / Forecast - Unless it is a natural disaster.        
         
         Input Headlines:
         {items_str}
