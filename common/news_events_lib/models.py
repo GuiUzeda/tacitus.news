@@ -79,7 +79,7 @@ class NewsEventModel(BaseModel):
     #   "place": {"Paris": 5},
     #   "topic": {"Defense Budget": 4}
     # }
-    interest_counts: Mapped[Optional[List[str]]] = mapped_column(
+    interest_counts: Mapped[Optional[dict[str, dict[str, int]]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
     # {"Conglomerate": 0, "Independent": 0, "State": 0}
@@ -171,7 +171,7 @@ class ArticleModel(BaseModel):
     summary: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     # CHANGED: All LLM/AI fields -> Nullable (Filled by Consumer)
-    stance_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    stance: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stance_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     main_topics: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
     # Interest/tags

@@ -2,7 +2,7 @@ import asyncio
 import sys
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 # Add parent dir to path to find modules (similar to other scripts)
@@ -27,6 +27,7 @@ from llm_parser import CloudNewsAnalyzer, LLMNewsOutputSchema
 
 from news_events_lib.models import NewsEventModel, ArticleModel, JobStatus
 
+
 class NewsEnhancerWorker:
     def __init__(self):
         self.settings = Settings()
@@ -35,11 +36,6 @@ class NewsEnhancerWorker:
         self.enhancer = CloudNewsAnalyzer()
 
         self.BATCH_SIZE = 5
-        
-        # --- FREE TIER CONTROLS ---
-        # Limit concurrent LLM calls. 
-        # Free tier is often ~2 RPM (Requests Per Minute) for Pro/Heavy models.
-        # We set 1 to be ultra-safe, or 2 if using Flash.
         self.semaphore = asyncio.Semaphore(1) 
 
     async def run(self):
@@ -58,8 +54,7 @@ class NewsEnhancerWorker:
 
     async def _analyze_with_retry(self, text: str) -> Optional[LLMNewsOutputSchema]:
         """
-        Wraps the LLM call with a Semaphore and a robust Retry loop 
-        specifically for 429 Resource Exhausted errors.
+        Wraps the LLM call with a Semaphore and a robust Retry loop.
         """
         async with self.semaphore:
             max_retries = 3
@@ -68,25 +63,21 @@ class NewsEnhancerWorker:
                     return await self.enhancer.analyze_article(text)
                 except Exception as e:
                     error_msg = str(e).lower()
-                    
-                    # Check for Rate Limit (429) or Quota (Resource Exhausted)
                     if "429" in error_msg or "resource_exhausted" in error_msg:
-                        # Default wait for free tier quota reset (usually 1 minute window)
                         wait_time = 60 
-                        
-                        # Try to find 'retry-after' in exception attributes if strictly provided
-                        # (Implementation varies by SDK version, so we fallback to 60s)
-                        
                         logger.warning(f"⚠️ Quota Exceeded (Attempt {attempt+1}/{max_retries}). Sleeping {wait_time}s...")
                         await asyncio.sleep(wait_time)
                         continue
-                    
-                    # If it's another error (e.g. 500, JSON error), just log and return None
                     logger.error(f"LLM Error: {e}")
                     return None
-            
-            logger.error("❌ Max retries reached for article.")
             return None
+            
+    def _map_stance_to_bucket(self, score: float) -> str:
+        if score <= -0.35:
+            return "critical"
+        elif score >= 0.35:
+            return "supportive"
+        return "neutral"
 
     async def process_batch(self) -> int:
         processed = 0
@@ -126,8 +117,6 @@ class NewsEnhancerWorker:
                     if not event or not job:
                         continue
 
-                    # Fetch PENDING articles only (as per your request)
-                    # We load 'newspaper' eagerly to get the bias
                     articles = (
                         session.query(ArticleModel)
                         .filter(ArticleModel.event_id == event.id)
@@ -138,76 +127,102 @@ class NewsEnhancerWorker:
                     )
 
                     if not articles:
-                        # Case: No new articles to process. 
-                        # We might still want to complete the job if there were old articles?
-                        # For now, following your logic to fail/skip if empty.
                         if event.article_count == 0:
                             job.status = JobStatus.FAILED
                             job.msg = "No articles found"
-                            session.commit()
                         else:
-                             # If we have old articles but no new pending ones, just mark job complete
                             job.status = JobStatus.COMPLETED
-                            session.commit()
+                        session.commit()
                         continue
 
                     logger.info(f"Enhancing '{event.title}' ({len(articles)} pending articles)...")
 
                     # --- CONCURRENCY STEP ---
-                    # 1. Prepare Tasks (Extract data to avoid session usage in async tasks)
                     tasks = []
                     for article in articles:
                         if not article.contents: 
-                            tasks.append(asyncio.sleep(0)) # No-op placeholder
+                            tasks.append(asyncio.sleep(0))
                             continue
-                        # Queue the task using our Semaphore-protected helper
                         tasks.append(self._analyze_with_retry(article.contents[0].content))
 
-                    # 2. Fire Requests (Controlled by Semaphore)
                     results = await asyncio.gather(*tasks)
 
                     # 3. Process Results & Update DB
                     new_summaries_list = []
                     
+                    # Prepare mutable dictionaries for event aggregation
+                    # We create copies to ensure SQLAlchemy detects changes
+                    event_interest_counts = dict(event.interest_counts or {})
+                    event_stance_dist = dict(event.stance_distribution or {})
+                    
                     for article, result in zip(articles, results):
-                        if not result or isinstance(result, int): # Handle None or sleep result
+                        if not result or isinstance(result, int): 
                             continue
 
-                        # Add to list for the Event Summarizer
+                        # A. Update Article
+                        article.main_topics = result.main_topics
+                        article.interests = result.entities 
+                        
+                        # Flatten entities for legacy ARRAY column
+                        all_entities = []
+                        if result.entities:
+                            for entity_list in result.entities.values():
+                                all_entities.extend(entity_list)
+                        article.entities = list(set(all_entities))
+
+                        article.summary = result.summary
+                        article.key_points = result.key_points
+                        article.stance = result.stance # Now Float
+                        article.stance_reasoning = result.stance_reasoning
+                        
+                        article.summary_status = JobStatus.COMPLETED
+                        article.summary_date = datetime.utcnow()
+                        session.add(article)
+
+                        # B. Collect for Summary Generation
                         new_summaries_list.append({
                             "bias": article.newspaper.bias,
                             "key_points": result.key_points
                         })
 
-                        # Update Article
-                        article.main_topics = result.main_topics
-                        article.entities = result.entities
-                        article.summary = result.summary
-                        article.key_points = result.key_points
-                        article.stance_label = result.stance
-                        article.stance_reasoning = result.stance_reasoning
-                        article.summary_status = JobStatus.COMPLETED
-                        article.summary_date = datetime.utcnow()
-                        session.add(article)
+                        # C. AGGREGATE TO EVENT (Mandatory Step)
+                        # 1. Interests
+                        if result.entities:
+                            for category, items in result.entities.items():
+                                if category not in event_interest_counts:
+                                    event_interest_counts[category] = {}
+                                for item in items:
+                                    event_interest_counts[category][item] = event_interest_counts[category].get(item, 0) + 1
+                        
+                        # 2. Stance Distribution
+                        # Map float stance to bucket
+                        bias = article.newspaper.bias
+                        bucket = self._map_stance_to_bucket(result.stance)
+                        
+                        if bias not in event_stance_dist:
+                            event_stance_dist[bias] = {}
+                        
+                        event_stance_dist[bias][bucket] = event_stance_dist[bias].get(bucket, 0) + 1
+
+                    # Apply aggregated stats to event
+                    event.interest_counts = event_interest_counts
+                    event.stance_distribution = event_stance_dist
+                    session.add(event)
                     
                     session.flush()
 
                     # --- EVENT SUMMARY STEP ---
-                    # Only run if we actually got new data
                     if new_summaries_list:
-                        # We pass the list of *new* summaries + the *old* summary context
                         event_summary = await self.enhancer.summarize_event(
                             new_summaries_list, 
-                            event.summary # Previous summary (context)
+                            event.summary 
                         )
                         
                         if event_summary:
                             event.summary = event_summary
                             event.last_summarized_at = datetime.utcnow()
-                            # Update count to reflect total
                             event.articles_at_last_summary = event.article_count 
-
-                        session.add(event)
+                            session.add(event)
 
                     # Finish Job
                     job.status = JobStatus.PROCESSING

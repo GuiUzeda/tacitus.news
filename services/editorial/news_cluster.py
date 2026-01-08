@@ -316,6 +316,7 @@ class NewsCluster:
         if event is None or article is None or vector is None:
             return None
 
+        # 1. Update Centroid & Basic Stats
         current_centroid = np.array(event.embedding_centroid)
         new_vector = np.array(vector)
         n = event.article_count
@@ -328,11 +329,95 @@ class NewsCluster:
         if event.search_text:
             event.search_text += f" {article.title}"
 
+        # 2. Aggregate Interests (Entities)
+        # Structure: {"person": {"Macron": 5}, "place": {"Paris": 2}}
+        if article.interests:
+            # Create a copy to ensure SQLAlchemy detects the JSON mutation
+            current_counts = dict(event.interest_counts or {})
+            
+            for category, items in article.interests.items():
+                if category not in current_counts:
+                    current_counts[category] = {}
+                
+                for item in items:
+                    current_counts[category][item] = current_counts[category].get(item, 0) + 1
+            
+            event.interest_counts = current_counts
+
+        # 3. Aggregate Newspaper Metadata
+        # We rely on lazy loading for article.newspaper (Session is active)
+        if article.newspaper:
+            # Bias Distribution: {"left": 10, "center": 5}
+            if article.newspaper.bias:
+                bias = article.newspaper.bias
+                bias_dist = dict(event.bias_distribution or {})
+                bias_dist[bias] = bias_dist.get(bias, 0) + 1
+                event.bias_distribution = bias_dist
+            
+            # Ownership Stats: {"Conglomerate": 1}
+            if article.newspaper.ownership_type:
+                otype = article.newspaper.ownership_type
+                own_stats = dict(event.ownership_stats or {})
+                own_stats[otype] = own_stats.get(otype, 0) + 1
+                event.ownership_stats = own_stats
+
+
+
+        # 5. Link
         article.event_id = event.id
         session.add(event)
         session.add(article)
         return event.id
 
+    def _create_new_event(self, session: Session, article, vector, reason=""):
+        # 1. Prepare Initial Aggregations
+        init_interests = {}
+        init_bias = {}
+        init_ownership = {}
+
+
+        # Interests
+        if article.interests:
+            for category, items in article.interests.items():
+                init_interests[category] = {}
+                for item in items:
+                    init_interests[category][item] = 1
+        
+        # Newspaper Metadata
+        if article.newspaper:
+            if article.newspaper.bias:
+                init_bias[article.newspaper.bias] = 1
+            
+            if article.newspaper.ownership_type:
+                init_ownership[article.newspaper.ownership_type] = 1
+
+
+        # 2. Create Event
+        new_event = NewsEventModel(
+            id=uuid.uuid4(),
+            title=article.title,
+            embedding_centroid=vector,
+            article_count=1,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            last_updated_at=datetime.now(timezone.utc),
+            search_text=f"{article.title} {self.derive_search_query(article)}",
+            # New Aggregated Fields
+            interest_counts=init_interests,
+            bias_distribution=init_bias,
+            ownership_stats=init_ownership,
+        )
+        session.add(new_event)
+        session.commit() # Immediate commit to reserve ID
+        
+        # 3. Link Article
+        article = session.merge(article)
+        article.event_id = new_event.id
+        session.add(article)
+        session.commit() 
+
+        logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
+        return new_event.id
     def _create_proposal(self, session, article, event, score, ambiguous=False):
         exists = session.execute(
             select(MergeProposalModel).where(
@@ -361,27 +446,7 @@ class NewsCluster:
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
 
-    def _create_new_event(self, session: Session, article, vector, reason=""):
-        new_event = NewsEventModel(
-            id=uuid.uuid4(),
-            title=article.title,
-            embedding_centroid=vector,
-            article_count=1,
-            is_active=True,
-            created_at=datetime.now(timezone.utc),
-            last_updated_at=datetime.now(timezone.utc),
-            search_text=f"{article.title} {self.derive_search_query(article)}",
-        )
-        session.add(new_event)
-        session.commit() # Immediate commit to reserve ID and make visible
-        
-        article = session.merge(article)
-        article.event_id = new_event.id
-        session.add(article)
-        session.commit() 
 
-        logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
-        return new_event.id
 
     async def run(self):
         while True:

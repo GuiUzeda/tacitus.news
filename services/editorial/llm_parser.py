@@ -156,11 +156,20 @@ class CloudNewsAnalyzer:
             ],
             "stance": "Ranges from -1.0 (critical) to 1.0 (supportive) 0.0 being neutral",
             "stance_reasoning": "Short markdown reasoning for the stace",
-            "entities": ["List", "of", "Key", "People/Orgs"],
-            "main_topics": ["Reforma Fiscal", "Infalação", etc]
+            "entities": {{
+                "person": ["Full Name 1", "Full Name 2"],
+                "place": ["City", "Country", "Region"],
+                "org": ["Company Name", "Institution"],
+                "topic": ["Topic 1", "Topic 2"]
+            }},
+            "main_topics": ["Reforma Fiscal", "Inflação", "Tag1"]
         }}
         
-        **Always answer in the SAME language that the article.**
+        **IMPORTANT on ENTITIES:**
+        - Extract specific names (e.g., "Lula" -> "Luiz Inácio Lula da Silva" if known).
+        - separate by category strictly.
+        
+        **Always answer in portuguese.**
         """
         response=None
         try:
