@@ -182,7 +182,7 @@ class ArticleModel(BaseModel):
     #   "place": ["Paris", "Berlin"],
     #   "topic": ["Defense Budget", "NATO"]
     # }
-    interests: Mapped[Optional[JSONB]] = mapped_column(
+    interests: Mapped[Optional[dict[str, List[str]]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
 

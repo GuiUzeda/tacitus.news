@@ -122,6 +122,8 @@ class NewsGetter:
                 entities.append(clean_text)
                 if ent.label == "PER":
                     interests['person'] = interests.get("person",[]) + [clean_text]
+                elif ent.label == "LOC":
+                    interests['place'] = interests.get("place",[]) + [clean_text]
                 elif ent.label == "ORG":
                     interests['organization'] = interests.get("organization",[]) + [clean_text]
                 else:
