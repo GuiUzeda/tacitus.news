@@ -4,7 +4,7 @@ import json
 import re
 import asyncio
 from loguru import logger
-from typing import List, Optional
+from typing import Dict, List, Optional
 from google import genai
 from google.genai import types
 import pydantic
@@ -108,9 +108,11 @@ class CloudNewsFilter:
 class LLMNewsOutputSchema(BaseModel):
     summary: str
     key_points: List[str]
-    stance: str
+    # FIXED: Changed from str to float to match the Prompt ("0.5") and DB Model
+    stance: float 
     stance_reasoning: str
-    entities: List[str]
+    # FIXED: Changed from List[str] to Dict[str, List[str]] to match Prompt ("entities": {"person": []})
+    entities: Dict[str, List[str]]
     main_topics: List[str]
     
 
@@ -153,7 +155,7 @@ class CloudNewsAnalyzer:
                 "Fact-dense sentence 3...",
                 "Fact-dense sentence 4..."
             ],
-            "stance": "Ranges from -1.0 (critical) to 1.0 (supportive) 0.0 being neutral",
+            "stance": 0.5,
             "stance_reasoning": "Short markdown reasoning for the stace",
             "entities": {{
                 "person": ["Full Name 1", "Full Name 2"],
@@ -163,6 +165,10 @@ class CloudNewsAnalyzer:
             }},
             "main_topics": ["Reforma Fiscal", "Inflação", "Tag1"]
         }}
+        
+        **STANCE GUIDE:**
+        - **Ranges from -1.0 (critical/negative) to 1.0 (supportive/positive).**
+        - **0.0** is completely neutral/informational.
         
         **IMPORTANT on ENTITIES:**
         - Extract specific names (e.g., "Lula" -> "Luiz Inácio Lula da Silva" if known).
