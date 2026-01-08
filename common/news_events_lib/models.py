@@ -82,6 +82,9 @@ class NewsEventModel(BaseModel):
     #   "place": {"Paris": 5},
     #   "topic": {"Defense Budget": 4}
     # }
+    ownership_stats: Mapped[Optional[dict[str, dict[str, int]]]] = mapped_column(
+        JSONB, default=lambda: {}
+    )
     article_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_updated_at: Mapped[datetime] = mapped_column(
@@ -99,7 +102,6 @@ class NewsEventModel(BaseModel):
     # 3-9 = Highlights
     # 10 = Standard Feed (Default)
     fe_priority: Mapped[int] = mapped_column(Integer, default=10)
-
 
     bias_distribution: Mapped[dict[str, int]] = mapped_column(JSONB, default=dict)
     stance_distribution: Mapped[dict[str, dict[str, int]]] = mapped_column(
