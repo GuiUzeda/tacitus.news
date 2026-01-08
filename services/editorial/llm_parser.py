@@ -98,6 +98,10 @@ class CloudNewsFilter:
             logger.error(f"CloudNewsFilter JSON Error: {e} | Raw: {response.text if response!=None else 'None'}")
             return []
         except Exception as e:
+            # If it's a rate limit error, re-raise so the caller can retry
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                raise e
+
             # Fallback: If AI fails, log it and maybe return nothing or everything?
             # Safer to return nothing and try next hour than to flood DB with trash.
             logger.error(f"CloudNewsFilter Error: {e}")

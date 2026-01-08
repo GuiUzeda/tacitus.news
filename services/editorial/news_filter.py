@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import re
 from datetime import datetime
 from time import mktime
 from typing import List, Dict, Any
@@ -27,7 +28,7 @@ from config import Settings
 from llm_parser import CloudNewsFilter
 
 
-class NewsProducer:
+class NewsFilter:
     def __init__(self):
         self.settings = Settings()
         self.engine = create_engine(str(self.settings.pg_dsn))
@@ -65,16 +66,18 @@ class NewsProducer:
                 .with_for_update(skip_locked=True)
             )
 
-            result = session.execute(stmt).all()
+            rows = session.execute(stmt).all()
 
-            if not result:
+            if not rows:
                 logger.info("Filter queue is empty. Exiting...")
                 return
 
             # Mark all as processing so other workers don't grab them
-            for _, queue in result:
+            result = []
+            for article, queue in rows:
                 queue.status = JobStatus.PROCESSING
                 session.add(queue)
+                result.append({"title": article.title, "queue_id": queue.id})
 
             session.commit()
             logger.info(f"Processing {len(result)} articles from the filter queue.")
@@ -85,8 +88,8 @@ class NewsProducer:
             batch = result[i : i + batch_size]
 
             # Extract just the titles for the AI
-            titles = [article.title for article, _ in batch]
-            queue_ids = [queue.id for _, queue in batch]
+            titles = [item["title"] for item in batch]
+            queue_ids = [item["queue_id"] for item in batch]
 
             approved_indices = []
             failed_batch = False
@@ -107,10 +110,19 @@ class NewsProducer:
                 except Exception as e:
                     msg = str(e)
                     if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                        wait_time = 20.0
+                        # Extract retryDelay if present, e.g. 'retryDelay': '3.66s'
+                        match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
+                        if match:
+                            try:
+                                wait_time = float(match.group(1)) + 1.0  # Add 1s buffer
+                            except ValueError:
+                                pass
+
                         logger.warning(
-                            f"⚠️ Quota Exceeded (429). Cooling down for 20s..."
+                            f"⚠️ Quota Exceeded (429). Cooling down for {wait_time:.2f}s..."
                         )
-                        await asyncio.sleep(20)
+                        await asyncio.sleep(wait_time)
                         continue
                     else:
                         logger.error(f"Unexpected error on batch {i}: {e}")
@@ -128,11 +140,11 @@ class NewsProducer:
                 # If AI completely failed, mark whole batch as Error to retry later or inspect
                 error_ids = queue_ids
             else:
-                for idx, (article, queue) in enumerate(batch):
+                for idx, item in enumerate(batch):
                     if idx in approved_indices:
-                        approved_ids.append(queue.id)
+                        approved_ids.append(item["queue_id"])
                     else:
-                        rejected_ids.append(queue.id)
+                        rejected_ids.append(item["queue_id"])
 
             # 4. UPDATE DB (Per Batch)
             # We open a NEW session here to commit this batch immediately
@@ -188,5 +200,5 @@ class NewsProducer:
 
 
 if __name__ == "__main__":
-    producer = NewsProducer()
+    producer = NewsFilter()
     asyncio.run(producer.run())
