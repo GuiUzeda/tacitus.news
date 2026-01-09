@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Any
 from google import genai
 from google.genai import types
 import pydantic
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # Initialize Client
 from config import Settings
@@ -35,6 +35,13 @@ class EventMatchSchema(BaseModel):
     key_matches: Dict[str, str]  # e.g., {'actors': 'Match', 'time': 'Mismatch'}
     discrepancies: Optional[str] = None
     reasoning: str
+
+    @field_validator("discrepancies", mode="before")
+    @classmethod
+    def parse_discrepancies(cls, v):
+        if isinstance(v, list):
+            return "; ".join(map(str, v))
+        return v
 
 # --- Classes ---
 
@@ -110,7 +117,7 @@ class CloudNewsFilter:
             logger.error(f"CloudNewsFilter JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return []
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
                 raise e
             logger.error(f"CloudNewsFilter Error: {e}")
             return []
@@ -125,41 +132,34 @@ class CloudNewsAnalyzer:
         Determines if two texts refer to the EXACT same real-world event 
         using Event Co-reference Resolution logic.
         """
+        ref_snippet = reference_text[:2500]
+        cand_snippet = candidate_text[:2500]
         prompt = f"""
-        You are an Expert Fact-Checker.
+        Role: Expert Fact-Checker.
+        Task: Determine if the [Candidate] refers to the **EXACT SAME specific event** as the [Reference].
         
-        Task: Determine if the [Candidate Text] refers to the **EXACT SAME specific event** as the [Reference Text].
+        [Reference Event]:
+        \"\"\"{ref_snippet}\"\"\"
         
-        **METHODOLOGY (Fingerprint Check):**
-        1. **Extract** the core "Event Fingerprint" from the Reference Text:
-           - **Who:** Specific actors (names, countries).
-           - **What:** Specific action (e.g., "seizure" vs "sinking").
-           - **Where:** Specific location.
-           - **When:** Specific time/date.
-        2. **Compare** this fingerprint against the Candidate Text.
-        3. **Ignore** differences in tone, length, or language.
-        4. **Constraint:** Allow for synonymy (e.g., "Jan 7" = "Wednesday"), but do NOT allow broad topic matching (e.g., "Both talk about oil" is NOT enough).
+        [Candidate Article]:
+        \"\"\"{cand_snippet}\"\"\"
         
-        [Reference Text / Ground Truth]:
-        \"\"\"{reference_text[:15000]}\"\"\"
-        
-        [Candidate Text]:
-        \"\"\"{candidate_text[:15000]}\"\"\"
-        
+        **CRITERIA:**
+        1. Compare Who, What, Where, When.
+        2. "Same Topic" (e.g., both about inflation) is NOT enough. Must be the SAME incident/report.
+        3. "Different Dates" = Different Events (usually).
+
         **OUTPUT JSON SCHEMA:**
         {{
           "same_event": boolean, 
-          "confidence_score": number, // 0.0 to 1.0
-          "key_matches": {{
-            "actors": "Explain match/mismatch",
-            "location": "Explain match/mismatch",
-            "timeframe": "Explain match/mismatch"
-          }},
-          "discrepancies": "List contradictions or None",
-          "reasoning": "Concise conclusion."
+          "confidence_score": number, // CRITICAL: Confidence in your VERDICT.
+                                      // 1.0 = Absolutely sure they are DIFFERENT OR Absolutely sure they are SAME.
+                                      // 0.1 = Ambiguous info, unsure.
+          "key_matches": {{ "actors": "...", "timeframe": "..." }},
+          "discrepancies": "Str or None",
+          "reasoning": "Concise verdict."
         }}
         """
-
         response = None
         try:
             response = await client.aio.models.generate_content(
@@ -181,6 +181,8 @@ class CloudNewsAnalyzer:
             logger.error(f"Event Verification Schema Error: {e}")
             return None
         except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+                raise e
             logger.error(f"Event Verification Error: {e}")
             return None
 

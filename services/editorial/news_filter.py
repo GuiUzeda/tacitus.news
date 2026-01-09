@@ -110,7 +110,7 @@ class NewsFilter:
                         break
                     except Exception as e:
                         msg = str(e)
-                        if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                        if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "503" in msg or "UNAVAILABLE" in msg:
                             wait_time = 20.0
                             # Extract retryDelay if present, e.g. 'retryDelay': '3.66s'
                             match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
@@ -121,7 +121,7 @@ class NewsFilter:
                                     pass
 
                             logger.warning(
-                                f"⚠️ Quota Exceeded (429). Cooling down for {wait_time:.2f}s..."
+                                f"⚠️ Quota Exceeded/Overloaded (429/503). Cooling down for {wait_time:.2f}s..."
                             )
                             await asyncio.sleep(wait_time)
                             continue

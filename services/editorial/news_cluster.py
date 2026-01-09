@@ -365,7 +365,11 @@ class NewsCluster:
     ):
         if event is None or article is None or vector is None:
             return None
-        session.refresh(event, with_for_update=True)
+        
+        # Lock explicitly to avoid "FOR UPDATE on outer join" error if event was loaded with joinedload
+        session.execute(select(NewsEventModel.id).where(NewsEventModel.id == event.id).with_for_update())
+        session.refresh(event)
+
         # 1. Update Centroid & Basic Stats
         current_centroid = np.array(event.embedding_centroid)
         new_vector = np.array(vector)
