@@ -37,15 +37,20 @@ class BaseHarvester:
             "Sec-Fetch-User": "?1",
         }
 
-    async def harvest(
-        self, session, sources:List[dict]
-    ) -> list[dict]:
+    async def harvest(self, session, sources: List[dict]) -> list[dict]:
         """
         Main entry point. Can be overridden by subclasses.
         """
-        articles =[]
+        articles = []
         for source in sources:
-            articles.extend(await self._fetch(session, source['url'], source['blocklist'], source['allowed_sections']))
+            articles.extend(
+                await self._fetch(
+                    session,
+                    source["url"],
+                    blocklist=source.get("blocklist"),
+                    allowed_sections=source.get("allowed_sections"),
+                )
+            )
         return articles
 
     async def harvest_latest_id(
@@ -160,7 +165,11 @@ class BaseHarvester:
                     "title": "Unknown",  # Trafilatura will fix this later
                     "link": link,
                     "source": base_domain,
-                    "published": pub_date or url_date if url_date else lastmod.text if lastmod else None,
+                    "published": (
+                        pub_date or url_date
+                        if url_date
+                        else lastmod.text if lastmod else None
+                    ),
                     "content": "Unknown",  # Trafilatura will fix this later
                 }
             )
@@ -275,7 +284,9 @@ class BaseHarvester:
 
         return filtered
 
-    async def harvest_latest_date(self, session, url , date_pattern,blocklist=None, allowed_sections=None):
+    async def harvest_latest_date(
+        self, session, url, date_pattern, blocklist=None, allowed_sections=None
+    ):
         """
         Fetches the Metropoles sitemap index and finds the URL for the latest date.
         Pattern: .../noticias-YYYY-MM-DD.xml
@@ -284,7 +295,7 @@ class BaseHarvester:
             async with session.get(url, timeout=10) as response:
                 if response.status != 200:
                     logger.warning(f"Metropoles Index fail {url}: {response.status}")
-                    return  []
+                    return []
                 xml_content = await response.read()
         except Exception as e:
             logger.warning(f"Metropoles Connection fail {url}: {e}")
@@ -292,7 +303,6 @@ class BaseHarvester:
 
         soup = BeautifulSoup(xml_content, "xml")
         maps = soup.find_all("sitemap")
-        
 
         date_pattern = re.compile(date_pattern)
 
@@ -317,8 +327,8 @@ class BaseHarvester:
 
         # Sort Descending (2026-01-06 > 2026-01-05)
         valid_locs.sort(key=lambda x: x[0], reverse=True)
-        
+
         latest_date, best_url = valid_locs[0]
         logger.info(f"📍 Latest sitemap: {latest_date} -> {best_url}")
-        
+
         return await self._fetch(session, best_url, blocklist, allowed_sections)

@@ -30,8 +30,8 @@ class CartaCapitalHarvester(BaseHarvester):
                 await harvester(
                     session=session,
                     url=source["url"],
-                    blocklist=source["blocklist"],
-                    allowed_sections=source["allowed_sections"],
+                    blocklist=source.get("blocklist"),
+                    allowed_sections=source.get("allowed_sections"),
                 )
             )
         return articles

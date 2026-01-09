@@ -187,8 +187,8 @@ class NewsCluster:
         session: Session,
         query_text: str,
         query_vector: List[float],
-        target_date: Optional[datetime] = datetime.now(timezone.utc),
-        diff_date: Optional[timedelta] = timedelta(days=5),
+        target_date: datetime = datetime.now(timezone.utc),
+        diff_date: timedelta = timedelta(days=5),
         limit: int = 10,
         rrf_k: int = 60,
     ):
@@ -275,6 +275,12 @@ class NewsCluster:
                 NewsEventModel.id == func.coalesce(sem_alias.c.id, kw_alias.c.id),
             )
             .order_by(desc("rrf_score"))
+            .where(
+                and_(
+                    NewsEventModel.created_at >= target_date - diff_date,
+                    NewsEventModel.created_at <= target_date,
+                )
+            )
             .limit(limit)
         )
 
@@ -312,14 +318,26 @@ class NewsCluster:
         best_ev, rrf_score, vec_dist = candidates[0]
 
         if vec_dist > self.SIMILARITY_LOOSE:
-            reason = f"Vector Dist {vec_dist:.2f} too high (Buzzword Trap)"
+            if rrf_score > 0.05:  # Arbitrary threshold implying strong keyword rank
+                return ClusterResult(
+                    "PROPOSE",
+                    best_ev.id,
+                    [{"title": best_ev.title, "score": vec_dist}],
+                    f"Yellow Zone ({vec_dist:.3f})",
+                )
+            reason = (
+                f"Vector Dist {vec_dist:.2f} too high (Buzzword Trap) {best_ev.title}"
+            )
             new_id = self._create_new_event(session, article, vector, reason=reason)
             return ClusterResult("NEW", new_id, [], reason)
 
         if self.SIMILARITY_STRICT < vec_dist < self.SIMILARITY_LOOSE:
             self._create_proposal(session, article, best_ev, vec_dist)
             return ClusterResult(
-                "PROPOSE", best_ev.id, [], f"Yellow Zone ({vec_dist:.3f})"
+                "PROPOSE",
+                best_ev.id,
+                [{"title": best_ev.title, "score": vec_dist}],
+                f"Yellow Zone ({vec_dist:.3f})",
             )
 
         if len(candidates) > 1:
@@ -347,7 +365,7 @@ class NewsCluster:
     ):
         if event is None or article is None or vector is None:
             return None
-
+        session.refresh(event, with_for_update=True)
         # 1. Update Centroid & Basic Stats
         current_centroid = np.array(event.embedding_centroid)
         new_vector = np.array(vector)
@@ -357,6 +375,7 @@ class NewsCluster:
         event.embedding_centroid = updated_centroid.tolist()
         event.article_count += 1
         event.last_updated_at = datetime.now(timezone.utc)
+        
 
         if event.search_text:
             event.search_text += f" {article.title}"
@@ -385,11 +404,10 @@ class NewsCluster:
             if article.newspaper.bias:
                 bias = article.newspaper.bias
                 bias_dist = dict(event.bias_distribution or {})
-                news_bias_dist = bias_dist.get(bias, set())
+                news_bias_dist = set(bias_dist.get(bias, []))
                 news_bias_dist.add(str(article.newspaper.id))
-                bias_dist[bias] = news_bias_dist
+                bias_dist[bias] = list(news_bias_dist)
                 event.bias_distribution = bias_dist
-
 
             # Ownership Stats: {"Conglomerate": 1}
             if article.newspaper.ownership_type:
@@ -400,6 +418,7 @@ class NewsCluster:
 
         # 5. Link
         article.event_id = event.id
+        event.articles.append(article)
         session.add(event)
         session.add(article)
         return event.id
@@ -420,7 +439,7 @@ class NewsCluster:
         # Newspaper Metadata
         if article.newspaper:
             if article.newspaper.bias:
-                init_bias[article.newspaper.bias] = set(str(article.newspaper.id))
+                init_bias[article.newspaper.bias] = [str(article.newspaper.id)]
 
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
@@ -432,7 +451,7 @@ class NewsCluster:
             embedding_centroid=vector,
             article_count=1,
             is_active=True,
-            created_at=datetime.now(timezone.utc),
+            created_at=article.published_date,
             last_updated_at=datetime.now(timezone.utc),
             search_text=f"{article.title} {self.derive_search_query(article)}",
             # New Aggregated Fields
@@ -484,6 +503,7 @@ class NewsCluster:
         while True:
             # 1. Fetch Batch (Locking)
             with self.SessionLocal() as session:
+                # add cont to the queue
                 stmt = (
                     select(ArticleModel, ArticlesQueueModel)
                     .join(
@@ -492,8 +512,8 @@ class NewsCluster:
                     )
                     .where(ArticlesQueueModel.status == JobStatus.PENDING)
                     .where(ArticlesQueueModel.queue_name == ArticlesQueueName.CLUSTER)
-                    .order_by(ArticlesQueueModel.created_at.asc())
-                    .limit(50)
+                    .order_by(ArticleModel.published_date.asc())
+                    .limit(100)
                     .with_for_update(skip_locked=True)
                 )
                 result = session.execute(stmt).all()
@@ -535,7 +555,7 @@ class NewsCluster:
                             queue.status = JobStatus.COMPLETED
                             queue.msg = f"Parked: {decision.reason}"
                             logger.warning(
-                                f"Action {decision.action}: {article.title[:20]} -> PARKED"
+                                f"Action {decision.action}: {article.title} -> PARKED"
                             )
 
                         else:

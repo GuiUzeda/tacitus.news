@@ -105,7 +105,7 @@ class NewsEventModel(BaseModel):
     # 10 = Standard Feed (Default)
     fe_priority: Mapped[int] = mapped_column(Integer, default=10)
     # { "left": ["news_paper_A"], "center": ["news_paper_A"], "right": ["news_paper_A"]}
-    bias_distribution: Mapped[dict[str, set[str]]] = mapped_column(JSONB, default=dict)
+    bias_distribution: Mapped[dict[str, list[str]]] = mapped_column(JSONB, default=dict)
     # {"positive": 0, "negative": 0, "neutral": 0, "avg": 0}
     stance_distribution: Mapped[dict[str, dict[str, int]]] = mapped_column(
         JSONB, default=dict

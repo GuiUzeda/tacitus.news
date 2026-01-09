@@ -78,7 +78,7 @@ class BackfillWorker:
             content_text = article.contents[0].content
             
             # 1. Run spaCy Extraction
-            structured_interests = self._extract_spacy_entities(content_text)
+            structured_interests = self._extract_spacy_entities(f"{article.title} {article.summary}")
 
             # 2. Update Article Fields
             # We DO NOT touch stance, summary, or main_topics

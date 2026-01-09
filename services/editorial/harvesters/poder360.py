@@ -28,10 +28,10 @@ class Poder360Harvester(BaseHarvester):
             harvester = url_harvesters.get(source["url"], super()._fetch)
             articles.extend(
                 await harvester(
-                    session,
-                    source["url"],
-                    blocklist=source["blocklist"],
-                    allowed_sections=source["allowed_sections"],
+                    session=session,
+                    url=source["url"],
+                    blocklist=source.get("blocklist"),
+                    allowed_sections=source.get("allowed_sections"),
                 )
             )
         return articles

@@ -4,11 +4,10 @@ import json
 import re
 import asyncio
 from loguru import logger
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from google import genai
 from google.genai import types
 import pydantic
-from regex import E
 from pydantic import BaseModel
 
 # Initialize Client
@@ -16,6 +15,28 @@ from config import Settings
 
 settings = Settings()
 client = genai.Client(api_key=settings.gemini_api_key)
+
+# --- Pydantic Schemas ---
+
+class LLMNewsOutputSchema(BaseModel):
+    summary: str
+    key_points: List[str]
+    stance: float 
+    stance_reasoning: str
+    entities: Dict[str, List[str]]
+    main_topics: List[str]
+
+class EventMatchSchema(BaseModel):
+    """
+    Schema for the Event Co-reference Resolution.
+    """
+    same_event: bool
+    confidence_score: float
+    key_matches: Dict[str, str]  # e.g., {'actors': 'Match', 'time': 'Mismatch'}
+    discrepancies: Optional[str] = None
+    reasoning: str
+
+# --- Classes ---
 
 class CloudNewsFilter:
     def __init__(self):
@@ -30,7 +51,6 @@ class CloudNewsFilter:
             return []
 
         # 1. Prepare the Batch Prompt
-        # We send ID + Title + Summary (if short) to give the model context
         items_str = ""
         for i, article in enumerate(articles_title):
             items_str += f"[{i}] Title: {article}\n"
@@ -63,8 +83,7 @@ class CloudNewsFilter:
         JSON Schema: [0, 2, 5, 12]
         """
 
-        # 2. Call the Small Model (Gemma 3 4B)
-        response=None
+        response = None
         try:
             response = await client.aio.models.generate_content(
                 model=self.model_id,
@@ -79,49 +98,113 @@ class CloudNewsFilter:
                 logger.warning("CloudNewsFilter received empty response.")
                 return []
 
-            # Clean markdown code blocks if present
             clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-
-            # 3. Parse and Select
             accepted_ids = json.loads(clean_text)
 
-            # Return the actual article objects that matched
             accepted_ids = [
                 i for i in accepted_ids if isinstance(i, int) and i < len(articles_title)
             ]
             return accepted_ids
-
         
         except json.JSONDecodeError as e:
-            logger.error(f"CloudNewsFilter JSON Error: {e} | Raw: {response.text if response!=None else 'None'}")
+            logger.error(f"CloudNewsFilter JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return []
         except Exception as e:
-            # If it's a rate limit error, re-raise so the caller can retry
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 raise e
-
-            # Fallback: If AI fails, log it and maybe return nothing or everything?
-            # Safer to return nothing and try next hour than to flood DB with trash.
             logger.error(f"CloudNewsFilter Error: {e}")
             return []
-
-class LLMNewsOutputSchema(BaseModel):
-    summary: str
-    key_points: List[str]
-    # FIXED: Changed from str to float to match the Prompt ("0.5") and DB Model
-    stance: float 
-    stance_reasoning: str
-    # FIXED: Changed from List[str] to Dict[str, List[str]] to match Prompt ("entities": {"person": []})
-    entities: Dict[str, List[str]]
-    main_topics: List[str]
-    
 
 class CloudNewsAnalyzer:
     def __init__(self):
         # The "Senior" Model
         self.model_id = "gemma-3-27b-it"
 
-    async def analyze_article(self, text: str) -> LLMNewsOutputSchema|None:
+    async def verify_event_match(self, reference_text: str, candidate_text: str) -> EventMatchSchema | None:
+        """
+        Determines if two texts refer to the EXACT same real-world event 
+        using Event Co-reference Resolution logic.
+        """
+        prompt = f"""
+        You are an Expert Fact-Checker.
+        
+        Task: Determine if the [Candidate Text] refers to the **EXACT SAME specific event** as the [Reference Text].
+        
+        **METHODOLOGY (Fingerprint Check):**
+        1. **Extract** the core "Event Fingerprint" from the Reference Text:
+           - **Who:** Specific actors (names, countries).
+           - **What:** Specific action (e.g., "seizure" vs "sinking").
+           - **Where:** Specific location.
+           - **When:** Specific time/date.
+        2. **Compare** this fingerprint against the Candidate Text.
+        3. **Ignore** differences in tone, length, or language.
+        4. **Constraint:** Allow for synonymy (e.g., "Jan 7" = "Wednesday"), but do NOT allow broad topic matching (e.g., "Both talk about oil" is NOT enough).
+        
+        [Reference Text / Ground Truth]:
+        \"\"\"{reference_text[:15000]}\"\"\"
+        
+        [Candidate Text]:
+        \"\"\"{candidate_text[:15000]}\"\"\"
+        
+        **OUTPUT JSON SCHEMA:**
+        {{
+          "same_event": boolean, 
+          "confidence_score": number, // 0.0 to 1.0
+          "key_matches": {{
+            "actors": "Explain match/mismatch",
+            "location": "Explain match/mismatch",
+            "timeframe": "Explain match/mismatch"
+          }},
+          "discrepancies": "List contradictions or None",
+          "reasoning": "Concise conclusion."
+        }}
+        """
+
+        response = None
+        try:
+            response = await client.aio.models.generate_content(
+                model="gemma-3-12b-it",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,  # Zero temp for maximum deterministic logic
+                ),
+            )
+            
+            text_response = response.text
+            if not text_response:
+                return None
+
+            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
+            return EventMatchSchema.model_validate_json(clean_text)
+
+        except pydantic.ValidationError as e:
+            logger.error(f"Event Verification Schema Error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Event Verification Error: {e}")
+            return None
+
+    async def batch_verify_events(self, reference_text: str, candidates: List[str]) -> List[EventMatchSchema]:
+        """
+        Checks a list of candidate texts against a reference text in parallel
+        to find all that refer to the same event.
+        Returns a list of results (containing both matches and mismatches).
+        """
+        if not candidates:
+            return []
+            
+        tasks = []
+        for candidate in candidates:
+            # We use a semaphore or rate limit logic ideally, but here we just gather
+            tasks.append(self.verify_event_match(reference_text, candidate))
+        
+        results = await asyncio.gather(*tasks)
+        
+        # Filter out errors (None) but keep the schema results
+        valid_results = [r for r in results if r is not None]
+        return valid_results
+
+    async def analyze_article(self, text: str) -> LLMNewsOutputSchema | None:
         today_context = datetime.now().strftime("%A, %d de %B de %Y")
         prompt = f"""
         You are an Intelligence Analyst for a geopolitical briefing service.
@@ -134,13 +217,12 @@ class CloudNewsAnalyzer:
         3. **No Introduction:** Do not say "The article says...". Just state the facts.
         4. **Always answer in the SAME language that the article.**
     
-        
         **STRUCTURE (Generate 4 to 5 bullet points):**
-        - **Bullet 1 (The Lead):** The core event. Who, What, Where, When. (e.g., "A car bomb killed General X in Moscow...").
-        - **Bullet 2 (The Details):** The specific mechanism or immediate scene. (e.g., "Device planted under vehicle", "Intercepted on R101 road").
-        - **Bullet 3 (The Context/Investigation):** Official responses, motives being investigated, or concurrent events.
-        - **Bullet 4 (The Pattern/Stats):** The bigger picture. Connect this to statistics, historical trends, or legal context (e.g., "This is the 3rd attack...", "Homicide rates rose to...").
-        - **Bullet 5 (Additional Info):** Optinal bullet point for aditional information relevant in the article.
+        - **Bullet 1 (The Lead):** The core event. Who, What, Where, When.
+        - **Bullet 2 (The Details):** The specific mechanism or immediate scene.
+        - **Bullet 3 (The Context/Investigation):** Official responses, motives.
+        - **Bullet 4 (The Pattern/Stats):** The bigger picture.
+        - **Bullet 5 (Additional Info):** Optional additional info.
         
         Input Context:
         Today is: {today_context}
@@ -148,41 +230,35 @@ class CloudNewsAnalyzer:
         
         **OUTPUT JSON SCHEMA:**
         {{
-            "summary": "Two senctence summary",
+            "summary": "Two sentence summary",
             "key_points": [
                 "Fact-dense sentence 1...",
-                "Fact-dense sentence 2...",
-                "Fact-dense sentence 3...",
-                "Fact-dense sentence 4..."
+                "Fact-dense sentence 2..."
             ],
             "stance": 0.5,
-            "stance_reasoning": "Short markdown reasoning for the stace",
+            "stance_reasoning": "Short markdown reasoning for the stance",
             "entities": {{
-                "person": ["Full Name 1", "Full Name 2"],
-                "place": ["City", "Country", "Region"],
-                "org": ["Company Name", "Institution"],
-                "topic": ["Topic 1", "Topic 2"]
+                "person": ["Full Name 1"],
+                "place": ["City", "Country"],
+                "org": ["Company Name"],
+                "topic": ["Topic 1"]
             }},
-            "main_topics": ["Reforma Fiscal", "Inflação", "Tag1"]
+            "main_topics": ["Reforma Fiscal", "Inflação"]
         }}
         
         **STANCE GUIDE:**
         - **Ranges from -1.0 (critical/negative) to 1.0 (supportive/positive).**
         - **0.0** is completely neutral/informational.
         
-        **IMPORTANT on ENTITIES:**
-        - Extract specific names (e.g., "Lula" -> "Luiz Inácio Lula da Silva" if known).
-        - separate by category strictly.
-        
         **Always answer in portuguese.**
         """
-        response=None
+        response = None
         try:
             response = await client.aio.models.generate_content(
                 model=self.model_id,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,  # Higher temp for better summary writing
+                    temperature=0.2,
                 ),
             )
             
@@ -201,16 +277,12 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer Error: {e}")
             return None
 
-
-    async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> dict|None:
+    async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> dict | None:
         """
         Takes a list of article summaries (grouped by bias) and generates
         the "Ground News" style comparison.
         """
-        # 1. Prepare Context
-        # We group inputs by bias to help the LLM understand the perspectives
         context_str = ""
-
         for item in article_summaries:
             context_str += f"[{item['bias'].upper()} SOURCE]: {item['key_points']}\n"
         
@@ -233,32 +305,29 @@ class CloudNewsAnalyzer:
         1. **Synthesis:** Merge new facts with existing data. Prioritize recent updates.
         2. **Bias Detection:** Look for omissions. What facts are specific sides ignoring?
         3. **Language:** Output strictly in **PORTUGUESE (PT-BR)**.
-        4. **Handling Missing Sides:** If a side (Left/Right) has no sources, set it to empty string `""`. Do not write "No coverage".
+        4. **Handling Missing Sides:** If a side (Left/Right) has no sources, set it to empty string `""`.
 
         **CRITICAL - TITLE RULES:**
         - The `title` must describe the **EVENT**, not your analysis.
-        - **BAD:** "Análise da Cobertura sobre a Greve" (Describes the report).
-        - **GOOD:** "Sindicato dos Metroviários anuncia Greve Geral em SP" (Describes the event).
-        - **FORBIDDEN WORDS in Title:** "Análise", "Cobertura", "Visão", "Relatório", "Comparativo", "Mídia".
+        - **FORBIDDEN WORDS in Title:** "Análise", "Cobertura", "Visão", "Relatório".
 
         **OUTPUT JSON SCHEMA:**
         {{
-            "title": "Direct, active-voice headline of the event (Subject + Verb + Context).",
-            "subtitle": "Contextual explanation of why this event matters.",
+            "title": "Direct, active-voice headline.",
+            "subtitle": "Contextual explanation.",
             "summary": {{
-                "left": "Markdown bullet points... OR empty string \"\" if no data.",
-                "right": "Markdown bullet points... OR empty string \"\" if no data.",
-                "center": "Markdown bullet points... OR empty string \"\" if no data.",
-                "bias": "Meta-analysis of the NARRATIVE. If one-sided, describe the tone of that side."
+                "left": "Markdown bullet points... OR \"\"",
+                "right": "Markdown bullet points... OR \"\"",
+                "center": "Markdown bullet points... OR \"\"",
+                "bias": "Meta-analysis of the NARRATIVE."
             }}
         }}
         
         Answer ONLY the VALID JSON.
         """
   
-        response=None
+        response = None
         try:
-            # Use the 27B model for this complex synthesis
             response = await client.aio.models.generate_content(
                 model="gemma-3-27b-it",
                 contents=prompt,

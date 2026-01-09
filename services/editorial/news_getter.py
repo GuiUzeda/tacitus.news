@@ -2,36 +2,33 @@ import asyncio
 import hashlib
 import json
 import random
-import uuid
+import re
 from datetime import datetime, timedelta
 from functools import partial
-from time import mktime
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import List, Optional, Set, Dict
 from uuid import UUID
 
 import aiohttp
-import feedparser
 import spacy
 import trafilatura
-from config import Settings
-from harvesters.factory import HarvesterFactory
-from llm_parser import CloudNewsFilter
 from loguru import logger
-from models import  ArticlesQueueModel, ArticlesQueueName
-from news_events_lib.models import (
-    ArticleContentModel,
-    ArticleModel,
-    AuthorModel,
-    FeedModel,
-    NewspaperModel,
-    JobStatus
-)
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import Row, create_engine, select
+from sqlalchemy import select, create_engine
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
+# Local project imports
+from config import Settings
+from harvesters.factory import HarvesterFactory
+from models import ArticlesQueueModel, ArticlesQueueName
+from news_events_lib.models import (
+    ArticleContentModel,
+    ArticleModel,
+    FeedModel,
+    NewspaperModel,
+    JobStatus
+)
 
 class NewsGetter:
     USER_AGENTS = [
@@ -39,7 +36,35 @@ class NewsGetter:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0",
+    ]
+
+    # Phrases that usually signal the start of the footer/marketing junk
+    STOP_PHRASES = [
+        "apoie o jornalismo",
+        "assine a edição",
+        "assine agora",
+        "faça parte da nossa comunidade",
+        "receba as notícias",
+        "receba as principais notícias",
+        "siga-nos no",
+        "siga a gente",
+        "clique aqui para",
+        "leia mais em:",
+        "leia também:",
+        "copyright ©",
+        "todos os direitos reservados",
+        "entre no canal do whatsapp",
+        "participe do grupo",
+        "conteúdo exclusivo para assinantes",
+        "fale com o colunista",
+        "newsletter",
+        "inscreva-se",
+        "baixe o app",
+        "google news",
+        "redação:",
+        "colaboração para o",
+        "veja também",
+        "o post apareceu primeiro em"
     ]
 
     def __init__(self):
@@ -49,90 +74,150 @@ class NewsGetter:
             autocommit=False, autoflush=False, bind=self.engine
         )
         self.harvester_factory = HarvesterFactory()
+        
+        # Standard Headers
         self.base_headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept-Encoding": "gzip, deflate, brotli",
             "Referer": "https://www.google.com/",
             "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "cross-site",
-            "Sec-Fetch-User": "?1",
         }
+
         logger.info("Loading AI Models...")
+        # 1. Embedding Model
         self.embedder = SentenceTransformer(
             "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True, device="cpu"
         )
-        # 2. NER Model (SpaCy) - Fast Entity Extraction
-        # Ensure you ran: python -m spacy download pt_core_news_lg
+        # Warmup to initialize lazy buffers (Rotary Embeddings) before multi-threaded use
+        # This prevents race conditions where _sin_cached is None during concurrent forward passes
+        self.embedder.encode("warmup")
+        
+        # 2. NER Model (SpaCy)
         try:
             self.nlp = spacy.load("pt_core_news_lg")
-            # Disable components we don't need for speed (parser, lemmatizer)
             self.nlp.disable_pipes(["parser", "lemmatizer"])
         except OSError:
-            logger.error(
-                "SpaCy model 'pt_core_news_lg' not found. Run: python -m spacy download pt_core_news_lg"
-            )
+            logger.error("SpaCy model 'pt_core_news_lg' not found.")
             self.nlp = None
-        logger.info("Models Loaded.")
+        
+        logger.info("NewsGetter Initialized.")
 
     @property
     def headers(self):
-        headers = self.base_headers.copy()
-        headers["User-Agent"] = random.choice(self.USER_AGENTS)
-        return headers
+        h = self.base_headers.copy()
+        h["User-Agent"] = random.choice(self.USER_AGENTS)
+        return h
 
-    async def fetch_links(
-        self, session: aiohttp.ClientSession, sources: List[dict], newspaper_name: str
-    ) -> list[dict]:
+    # --- TEXT CLEANING & VECTORIZATION (The Fix) ---
 
-        harvester = self.harvester_factory.get_harvester(newspaper_name)
-
-        articles = await harvester.harvest(session, sources)
-
-        logger.info(
-            f"Harvested {len(articles)} High-Priority articles from {newspaper_name}"
-        )
-        return articles
-    def extract_fast_entities(self, text: str) -> List[str]:
+    def clean_text_for_embedding(self, text: str) -> str:
         """
-        Extracts PERSON, ORG, and LOC from text using SpaCy.
-        Returns a list of clean strings.
+        Aggressively strips footer boilerplate to prevent vector contamination.
         """
-        if not self.nlp or not text: 
-            return []
-            
-        # Truncate to avoid memory spikes with massive articles
-        doc = self.nlp(text[:50000]) 
+        if not text:
+            return ""
+
+        lines = text.split('\n')
+        clean_lines = []
         
-        entities = []
-        interests = {}
+        # Heuristic: If we hit a stop phrase, we assume everything after is junk.
+        for line in lines:
+            lower_line = line.lower().strip()
+            
+            # Check for exact stop phrase matches
+            if any(phrase in lower_line for phrase in self.STOP_PHRASES):
+                # Extra check: Don't stop if the line is very long (it might be a narrative sentence containing a common word)
+                if len(line) < 150: 
+                    break 
+            
+            clean_lines.append(line)
+            
+        cleaned_text = "\n".join(clean_lines).strip()
+
+        # Safety Fallback: If we stripped too much (e.g., empty string), use the original first 1000 chars
+        if len(cleaned_text) < 50 and len(text) > 200:
+            logger.warning("Cleaning removed almost all text. Reverting to head of original.")
+            return text[:2000]
+
+        return cleaned_text
+
+    def calculate_vector(self, text: str) -> list[float]:
+        """
+        Generates vector from CLEANED and TRUNCATED text.
+        """
+        if not text or len(text) < 10:
+            return [0.0] * 768
+
+        # 1. Clean
+        clean_txt = self.clean_text_for_embedding(text)
+        
+        # 2. Truncate (Nomic allows 8192, but for clustering, the lead is key)
+        # We take the first ~3000 chars (approx 500-700 tokens) to ensure 
+        # the footer never influences the centroid.
+        truncated_txt = clean_txt[:3000]
+
+        prefix = "search_document: "
+        try:
+            return self.embedder.encode(prefix + truncated_txt).tolist()
+        except Exception as e:
+            logger.error(f"Vectorization failed: {e}")
+            return [0.0] * 768
+
+    def extract_interests(self, text: str) -> Dict[str, List[str]]:
+        """Extracts entities categorized for interests."""
+        if not self.nlp or not text: 
+            return {}
+            
+        # We only need the start of the article for main entities
+        doc = self.nlp(text[:5000]) 
+        
+        interests = {
+            "person": [],
+            "organization": [],
+            "place": [],
+            "topic": []
+        }
         seen = set()
         
-        # Prioritize these labels
-        target_labels = {"PER", "ORG", "LOC", "MISC"}
+        # Map SpaCy labels to our schema
+        label_map = {
+            "PER": "person",
+            "ORG": "organization",
+            "LOC": "place",
+            "MISC": "topic"
+        }
         
         for ent in doc.ents:
-            clean_text = ent.text.strip()
-            if len(clean_text) < 2 or clean_text.lower()  in seen:
+            clean = ent.text.strip()
+            if len(clean) < 2 or clean.lower() in seen:
                 continue
-            # Basic filter: remove short noise and duplicates
-            if ent.label_ in target_labels:
-                entities.append(clean_text)
-                if ent.label == "PER":
-                    interests['person'] = interests.get("person",[]) + [clean_text]
-                elif ent.label == "LOC":
-                    interests['place'] = interests.get("place",[]) + [clean_text]
-                elif ent.label == "ORG":
-                    interests['organization'] = interests.get("organization",[]) + [clean_text]
-                else:
-                    interests['topic'] = interests.get("topic",[]) + [clean_text]
-
-                seen.add(clean_text.lower())
+            
+            category = label_map.get(ent.label_)
+            if category:
+                interests[category].append(clean)
+                seen.add(clean.lower())
                 
-        # Return top 10 most relevant-looking entities
-        return entities[:10]
+        # Clean up empty keys and limit
+        return {k: v[:5] for k, v in interests.items() if v}
+
+    # --- FETCHING PIPELINE ---
+
+    async def fetch_links(self, session: aiohttp.ClientSession, sources: List[dict], newspaper_name: str) -> list[dict]:
+        harvester = self.harvester_factory.get_harvester(newspaper_name)
+        articles = await harvester.harvest(session, sources)
+        logger.info(f"[{newspaper_name}] Found {len(articles)} candidate links.")
+        return articles
+
+    async def fetch_article_content(self, http_session: aiohttp.ClientSession, url: str, retries: int = 2):
+        for attempt in range(retries):
+            try:
+                async with http_session.get(url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                    if response.status == 200:
+                        return await response.text()
+            except Exception:
+                await asyncio.sleep(1)
+        return None
+
     async def process_newspaper_articles(
         self,
         http_session: aiohttp.ClientSession,
@@ -140,338 +225,200 @@ class NewsGetter:
         newspaper_name: str,
         newspaper_id: UUID,
         ignore_hashes: Optional[set] = None,
-        concurrency: int = 10,
-        max_failures: int = 5,
+        concurrency: int = 5
     ) -> List[dict]:
-        """
-        Uses the Harvester to get links from the homepage,
-        then passes them to the standard parser.
-        """
-        if ignore_hashes is None:
-            ignore_hashes = set()
-
+        
+        if ignore_hashes is None: ignore_hashes = set()
         raw_entries = await self.fetch_links(http_session, sources, newspaper_name)
-
-        if not raw_entries:
-            return []
+        
+        if not raw_entries: return []
 
         semaphore = asyncio.Semaphore(concurrency)
-        failure_count = 0
-        circuit_broken = False
         loop = asyncio.get_running_loop()
-
-        async def _parse_entry(entry):
-            nonlocal failure_count, circuit_broken
+        
+        async def _process(entry):
             try:
-                if circuit_broken:
-                    return None
-
-                clean_link = "https://" + entry["link"].split(r"https://")[-1]
+                clean_link = entry["link"]
+                # Basic hash check
                 link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
                 if link_hash in ignore_hashes:
                     return None
 
                 async with semaphore:
-                    if circuit_broken:
-                        return None
-                    url_content = await self.fetch_article_content(
-                        http_session, clean_link
-                    )
+                    html = await self.fetch_article_content(http_session, clean_link)
 
-                if not url_content:
-                    failure_count += 1
-                    if failure_count >= max_failures:
-                        circuit_broken = True
-                        logger.warning(
-                            f"Circuit breaker tripped for {newspaper_name} after {failure_count} consecutive failures."
-                        )
-                    return None
+                if not html: return None
 
-                # Reset failure count on success
-                failure_count = 0
+                # CPU-bound Extraction
+                extracted_json = await loop.run_in_executor(
+                    None,
+                    partial(trafilatura.extract, html, with_metadata=True, output_format="json", include_comments=False)
+                )
+                
+                if not extracted_json: return None
+                
+                data = json.loads(extracted_json)
+                raw_text = data.get("raw_text", "")
+                
+                if len(raw_text) < 100: return None # Skip empty articles
 
-                extracted_json = {}
-                try:
-                    # Run CPU-bound extraction in a separate thread to avoid blocking the event loop
-                    extracted = await loop.run_in_executor(
-                        None,
-                        partial(
-                            trafilatura.extract,
-                            url_content,
-                            with_metadata=True,
-                            output_format="json",
-                            include_comments=False,
-                        ),
-                    )
-                    if extracted:
-                        extracted_json = json.loads(extracted)
-                except Exception as e:
-                    logger.error(f"Error parsing {clean_link}: {e}")
-                    return None
+                # --- CRITICAL: Generate Metadata from CLEAN Text ---
+                clean_text = self.clean_text_for_embedding(raw_text)
+                
+                # 1. Calc Embedding (Uses clean_text internally)
+                embedding = await loop.run_in_executor(None, self.calculate_vector, clean_text)
+                
+                # 2. Extract Entities & Interests
+                # Trafilatura tags -> entities (flat)
+                tags = [t.strip() for t in data.get("tags", "").split(",") if t.strip()]
+                
+                # SpaCy -> interests (categorized)
+                extraction_text = f"{data.get('title', '')} {data.get('excerpt', '')} {clean_text[:2000]}"
+                interests = await loop.run_in_executor(None, self.extract_interests, extraction_text)
+                
+                # Flatten interests for 'entities' column (legacy/search support)
+                flat_interests = [item for sublist in interests.values() for item in sublist]
+                all_entities = list(set(tags + flat_interests))[:15]
 
-                if extracted_json:
-                    entities = [
-                            tag.strip()
-                            for tag in extracted_json.get("tags", "")
-                            .replace(";", ", ")
-                            .split(", ")
-                        ]
-                    content = extracted_json.get("raw_text", "")
-                    if not entities:
-                        entities = await asyncio.to_thread(self.extract_fast_entities, content) 
-                    embedding = await asyncio.to_thread(self.calculate_vector, content)
-                        
-
-                    return {
-                        "title": extracted_json.get("title"),
-                        "link": clean_link,
-                        "hash": link_hash,
-                        "published": entry.get(
-                            "published",
-                            extracted_json.get("date", extracted_json.get("filedate")),
-                        ),
-                        "summary": extracted_json.get("excerpt"),
-                        "content": content,
-                        "newspaper_id": newspaper_id,
-                        "entities": entities,
-                        "embedding": embedding
-                    }
-                return []
+                return {
+                    "title": data.get("title") or entry.get("title"),
+                    "link": clean_link,
+                    "hash": link_hash,
+                    "published": entry.get("published") or data.get("date"),
+                    "summary": data.get("excerpt"),
+                    "content": raw_text, # Save FULL text
+                    "newspaper_id": newspaper_id,
+                    "entities": all_entities,
+                    "interests": interests,
+                    "embedding": embedding
+                }
             except Exception as e:
-                logger.error(f"Unexpected error processing entry {entry}: {e}")
-                return []
-
-        tasks = [_parse_entry(entry) for entry in raw_entries]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        final_entries = [r for r in results if r is not None and isinstance(r, dict)]
-        return final_entries
-
-    async def fetch_article_content(
-        self, http_session: aiohttp.ClientSession, url: str, retries: int = 3
-    ):
-        for attempt in range(retries):
-            try:
-                async with http_session.get(
-                    url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=40)
-                ) as response:
-                    response.raise_for_status()
-                    return await response.text()
-            except Exception as e:
-                if attempt < retries - 1:
-                    await asyncio.sleep(2**attempt)
-                    continue
-                logger.error(f"Failed to fetch article content from {url}: {e}")
+                logger.error(f"Error processing {entry['link']}: {e}")
                 return None
 
+        tasks = [_process(e) for e in raw_entries]
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
+
+    # --- DATABASE SAVING ---
+
     def _parse_published_date(self, pub_data: Optional[str]) -> datetime:
-        dt_object = datetime.now()
-        if pub_data:
-            try:
-                dt_object = datetime.fromisoformat(pub_data)
-            except (ValueError, TypeError, OverflowError):
-                pass
-        return dt_object
-
-    def _save_article(self, session, article_data: dict) -> Optional[ArticleModel]:
+        if not pub_data: return datetime.now()
         try:
-            # Use Nested Transaction (Savepoint) for each article
-            # If this article fails, it rolls back ONLY this article
+            return datetime.fromisoformat(str(pub_data))
+        except:
+            return datetime.now()
+
+    def _save_article(self, session, data: dict) -> Optional[ArticleModel]:
+        try:
             with session.begin_nested():
-                dt_object = self._parse_published_date(article_data.get("published"))
-
-                content_model = ArticleContentModel(content=article_data["content"])
-
+                dt = self._parse_published_date(data.get("published"))
+                
                 article = ArticleModel(
-                    title=article_data["title"],
-                    original_url=article_data["link"],
-                    url_hash=article_data["hash"],
-                    summary=article_data["summary"],
-                    summary_date=dt_object,
-                    published_date=dt_object,
-                    newspaper_id=article_data["newspaper_id"],
+                    title=data["title"],
+                    original_url=data["link"],
+                    url_hash=data["hash"],
+                    summary=data["summary"],
+                    summary_date=dt,
+                    published_date=dt,
+                    newspaper_id=data["newspaper_id"],
                     authors=[],
-                    contents=[content_model],
-                    # Handle Nullables explicitly to prevent accidental errors
-                    subtitle=None,
-                    stance_label=None,
-                    main_topics=None,
-                    entities=article_data["entities"],
-                    key_points=None,
-                    embedding=article_data["embedding"],
+                    contents=[ArticleContentModel(content=data["content"])],
+                    entities=data["entities"],
+                    interests=data.get("interests", {}),
+                    embedding=data["embedding"],
+                    subtitle=None, stance=None, main_topics=None, key_points=None
                 )
-
                 session.add(article)
-                session.flush()  # Force SQL generation to catch constraints
+                session.flush()
                 return article
-
-        except IntegrityError as e:
-            # Log unique violations as warnings, ignore them
-            logger.warning(f"Skipping duplicate: {article_data['title'][:30]}... {e}")
-            return None
+        except IntegrityError:
+            return None # Duplicate
         except Exception as e:
-            logger.error(f"Failed to save article {article_data['title'][:30]}: {e}")
+            logger.error(f"DB Error saving {data['link']}: {e}")
             return None
 
     def _queue_articles(self, session, articles: List[ArticleModel]):
-        queue_count = 0
-        for article in articles:
-            if not article.contents:
-                continue
-
-            txt = article.contents[0].content
-            tokens = len(txt) // 4
-
-            stmt = (
-                insert(ArticlesQueueModel)
-                .values(
-                    article_id=article.id,
-                    estimated_tokens=tokens,
-                    status=JobStatus.PENDING,
-                    queue_name=ArticlesQueueName.FILTER,
-                )
-                .on_conflict_do_nothing(index_elements=["article_id"])
-            )
-
-            session.execute(stmt)
-            queue_count += 1
-
-        session.commit()
-        logger.success(f"Analysis Queue populated with {queue_count} jobs.")
-
-    async def get_news(
-        self,
-    ):
-
-        newspapers = await self._get_newspapers()
-        logger.info(f"Found {len(newspapers)} newspapers.")
-        with self.SessionLocal() as session:
-            async with aiohttp.ClientSession(headers=self.headers) as http_session:
-
-                for newspaper in newspapers:
-                    await self._process_single_newspaper(
-                        session, http_session, newspaper
-                    )
-
-    async def _process_single_newspaper(self, session, http_session, newspaper):
-        sources = [
+        if not articles: return
+        stmt = insert(ArticlesQueueModel).values([
             {
-                "url": feed.url,
-                "blocklist": feed.blocklist,
-                "allowed_sections": feed.allowed_sections,
-            }
-            for feed in newspaper["feeds"]
-        ]
+                "article_id": a.id,
+                "estimated_tokens": len(a.contents[0].content)//4,
+                "status": JobStatus.PENDING,
+                "queue_name": ArticlesQueueName.FILTER
+            } for a in articles
+        ]).on_conflict_do_nothing()
+        session.execute(stmt)
 
+    # --- MAIN EXECUTION ---
+
+    async def get_news(self):
+        newspapers = await self._get_newspapers()
+        logger.info(f"Processing {len(newspapers)} newspapers.")
+        
+        async with aiohttp.ClientSession(headers=self.headers) as http_session:
+            with self.SessionLocal() as session:
+                for np in newspapers:
+                    await self._process_single_newspaper(session, http_session, np)
+
+    async def _process_single_newspaper(self, session, http_session, np):
+        sources = [{"url": f.url} for f in np["feeds"]]
         articles_data = await self.process_newspaper_articles(
-            http_session,
-            sources,
-            newspaper["name"],
-            newspaper["id"],
-            newspaper["article_hashes"],
+            http_session, sources, np["name"], np["id"], np["article_hashes"]
         )
-
-        successful_articles = []
-        for article_data in articles_data:
-            article = self._save_article(session, article_data)
-            if article:
-                successful_articles.append(article)
-
+        
+        saved_count = 0
+        saved_objs = []
+        for d in articles_data:
+            obj = self._save_article(session, d)
+            if obj: 
+                saved_count += 1
+                saved_objs.append(obj)
+        
+        if saved_objs:
+            self._queue_articles(session, saved_objs)
+        
         session.commit()
-        logger.success(
-            f"Saved {len(successful_articles)} articles for {newspaper['name']}."
-        )
-
-        if successful_articles:
-            self._queue_articles(session, successful_articles)
-
-    def calculate_vector(self, text: str) -> list[float]:
-        """Generates the vector using your chosen model (Nomic/BGE)."""
-        if not text or len(text) < 5:
-            logger.warning("Text too short for vectorization. Returning zero vector.")
-            return [0.0] * 768
-
-        # Nomic specific prefix
-        prefix = "search_document: "
-        try:
-            return self.embedder.encode(prefix + text).tolist()
-        except Exception as e:
-            logger.error(f"Vectorization failed: {e}")
-            return [0.0] * 768
+        if saved_count > 0:
+            logger.success(f"[{np['name']}] Saved {saved_count} new articles.")
 
     async def _get_newspapers(self) -> List[dict]:
-        three_months = datetime.now() - timedelta(days=90)
+        # Helper to fetch config from DB
         with self.SessionLocal() as session:
-            stmt = (
-                select(NewspaperModel)
-                .join(FeedModel)
-                .where(FeedModel.is_active == True)
-                .distinct()
-            )
-            newspapers = session.execute(stmt).scalars().all()
-            if not newspapers:
-                return []
+            cutoff = datetime.now() - timedelta(days=60)
+            
+            # 1. Get Newspapers with Active Feeds
+            q = select(NewspaperModel).join(FeedModel).where(FeedModel.is_active == True).distinct()
+            newspapers = session.execute(q).scalars().all()
+            
+            if not newspapers: return []
+            
+            # 2. Pre-fetch Feeds & Hashes (Bulk Optimization)
+            ids = [n.id for n in newspapers]
+            
+            feeds = session.execute(
+                select(FeedModel).where(FeedModel.newspaper_id.in_(ids), FeedModel.is_active == True)
+            ).scalars().all()
+            
+            hashes = session.execute(
+                select(ArticleModel.newspaper_id, ArticleModel.url_hash)
+                .where(ArticleModel.newspaper_id.in_(ids), ArticleModel.published_date >= cutoff)
+            ).all()
 
-            newspaper_ids = [n.id for n in newspapers]
+            # 3. Map Results
+            feed_map = {i: [] for i in ids}
+            for f in feeds: feed_map[f.newspaper_id].append(f)
+            
+            hash_map = {i: set() for i in ids}
+            for nid, h in hashes: hash_map[nid].add(h)
 
-            # Bulk fetch feeds
-            feeds_stmt = select(FeedModel).where(
-                FeedModel.newspaper_id.in_(newspaper_ids), FeedModel.is_active == True
-            )
-            all_feeds = session.execute(feeds_stmt).scalars().all()
-            feeds_map = {nid: [] for nid in newspaper_ids}
-            for feed in all_feeds:
-                feeds_map[feed.newspaper_id].append(feed)
-
-            # Bulk fetch hashes
-            hashes_stmt = select(
-                ArticleModel.newspaper_id, ArticleModel.url_hash
-            ).where(
-                ArticleModel.newspaper_id.in_(newspaper_ids),
-                ArticleModel.published_date >= three_months,
-            )
-            all_hashes = session.execute(hashes_stmt).all()
-            hashes_map = {nid: set() for nid in newspaper_ids}
-            for nid, url_hash in all_hashes:
-                hashes_map[nid].add(url_hash)
-
-            results = []
-            for newspaper in newspapers:
-                results.append(
-                    {
-                        "name": newspaper.name,
-                        "id": newspaper.id,
-                        "feeds": feeds_map.get(newspaper.id, []),
-                        "article_hashes": hashes_map.get(newspaper.id, set()),
-                    }
-                )
-        return results
-
-    async def get_hashes_ignore(self, newspaper_id) -> Set[str]:
-        with self.SessionLocal() as session:
-            stmt = select(ArticleModel.url_hash).where(
-                ArticleModel.newspaper_id == newspaper_id
-            )
-            hashes = session.execute(stmt).scalars().all()
-        return set(hashes)
-
-    async def get_news_from_feed(
-        self,
-        http_session,
-        sources: List[dict],
-        newspapaer_name,
-        newspaper_id,
-        ignore_hashes=set(),
-    ):
-        return await self.process_newspaper_articles(
-            http_session, sources, newspapaer_name, newspaper_id, ignore_hashes
-        )
-
+            return [{
+                "id": n.id, 
+                "name": n.name, 
+                "feeds": feed_map[n.id], 
+                "article_hashes": hash_map[n.id]
+            } for n in newspapers]
 
 if __name__ == "__main__":
-    link_harvester = NewsGetter()
-
-    async def main():
-        news = await link_harvester.get_news()
-        print(news)
-
-    asyncio.run(main())
+    getter = NewsGetter()
+    asyncio.run(getter.get_news())
