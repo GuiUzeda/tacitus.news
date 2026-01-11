@@ -40,7 +40,7 @@ def with_retry(max_retries=3, base_delay=5):
                         wait = base_delay * (2 ** attempt) 
                         
                         # Check for specific retry delay in message
-                        match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
+                        match = re.search(r"['\"]retrydelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
                         if match:
                             try:
                                 wait = float(match.group(1)) + 1.0
