@@ -9,7 +9,8 @@ from typing import Dict, List, Optional, Any
 from google import genai
 from google.genai import types
 import pydantic
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
+import random
 
 # Initialize Client
 from config import Settings
@@ -19,7 +20,7 @@ client = genai.Client(api_key=settings.gemini_api_key)
 
 # --- Decorators ---
 
-def with_retry(max_retries=3, base_delay=5):
+def with_retry(max_retries=5, base_delay=30):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -43,7 +44,7 @@ def with_retry(max_retries=3, base_delay=5):
                         match = re.search(r"['\"]retrydelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
                         if match:
                             try:
-                                wait = float(match.group(1)) + 1.0
+                                wait = (float(match.group(1)) + random.randint(0, 20)) * (2 ** attempt) 
                             except ValueError:
                                 pass
                         
@@ -76,7 +77,7 @@ class EventMatchSchema(BaseModel):
     """
     same_event: bool
     confidence_score: float
-    key_matches: Dict[str, str]  # e.g., {'actors': 'Match', 'time': 'Mismatch'}
+    key_matches: Dict[str, str] = Field(default_factory=dict)  # e.g., {'actors': 'Match', 'time': 'Mismatch'}
     discrepancies: Optional[str] = None
     reasoning: str
 
@@ -87,6 +88,15 @@ class EventMatchSchema(BaseModel):
             return "; ".join(map(str, v))
         return v
 
+    @field_validator("key_matches", mode="before")
+    @classmethod
+    def validate_key_matches(cls, v):
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return {k: (str(val) if val is not None else "N/A") for k, val in v.items()}
+        return v
+
 # --- Classes ---
 
 class CloudNewsFilter:
@@ -94,7 +104,7 @@ class CloudNewsFilter:
         # The "Intern" Model
         self.model_id = "gemma-3-4b-it"
 
-    @with_retry(max_retries=5, base_delay=10)
+    @with_retry(max_retries=5, base_delay=30)
     async def filter_batch(self, articles_title: List[dict]) -> List[int]:
         """
         Takes a list of 50 raw entries. Returns ONLY the relevant ones.
@@ -125,7 +135,8 @@ class CloudNewsFilter:
         - Celebrity Gossip / Novelas / Reality Shows (BBB).
         - Horoscopes / Recipes / lifestyle tips.
         - Product Reviews (e.g., "Review of iPhone 16"), including cars
-        - Weather / Forecast - Unless it is a natural disaster.        
+        - Weather / Forecast - Unless it is a natural disaster.    
+        - Lotery results.    
         
         Input Headlines:
         {items_str}
@@ -172,7 +183,7 @@ class CloudNewsAnalyzer:
         # The "Senior" Model
         self.model_id = "gemma-3-27b-it"
 
-    @with_retry(max_retries=3, base_delay=5)
+    @with_retry(max_retries=5, base_delay=30)
     async def verify_event_match(self, reference_text: str, candidate_text: str) -> EventMatchSchema | None:
         """
         Determines if two texts refer to the EXACT same real-world event 
@@ -252,7 +263,7 @@ class CloudNewsAnalyzer:
         valid_results = [r for r in results if r is not None]
         return valid_results
 
-    @with_retry(max_retries=3, base_delay=5)
+    @with_retry(max_retries=5, base_delay=30)
     async def analyze_article(self, text: str) -> LLMNewsOutputSchema | None:
         today_context = datetime.now().strftime("%A, %d de %B de %Y")
         prompt = f"""
@@ -333,7 +344,7 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer Error: {e}")
             return None
 
-    @with_retry(max_retries=3, base_delay=5)
+    @with_retry(max_retries=5, base_delay=30)
     async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> dict | None:
         """
         Takes a list of article summaries (grouped by bias) and generates
@@ -407,24 +418,45 @@ class CloudNewsAnalyzer:
             logger.error(f"Event summarization failed: {e}")
             return None
         
-    @with_retry(max_retries=3, base_delay=5)
-    async def verify_event_merge(self, event_a: Dict, event_b: Dict) :
+    @with_retry(max_retries=5, base_delay=30)
+    async def verify_event_merge(self, event_a: Dict, event_b: Dict) -> EventMatchSchema | None:
         """
         Verify if TWO EVENTS represent the exact same incident.
+        
+        Expected Input (event_a/b):
+        {
+            "title": str,
+            "date": str,
+            "articles": [
+                {"title": str, "date": str, "snippet": str}, ...
+            ]
+        }
         """
+        def format_event_articles(articles: List[Dict]) -> str:
+            if not articles: return "No articles."
+            # Take first 5 articles
+            selected = articles[:3]
+            output = ""
+            for i, art in enumerate(selected):
+                output += f"{i+1}. [{art.get('date', 'N/A')}] {art.get('title', 'No Title')}\n"
+                output += f"   Snippet: {art.get('snippet', '')[:300]}\n"
+            return output
+
         prompt = f"""
         You are a Senior Editor responsible for deduplication. 
         I have two event clusters that might refer to the same real-world incident.
 
         EVENT A (Master Candidate):
         Title: {event_a.get('title')}
-        Summary: {event_a.get('summary_text', 'No summary')}
-        Entities: {event_a.get('entities', [])}
+        Date: {event_a.get('date')}
+        Key Articles:
+        {format_event_articles(event_a.get('articles', []))}
 
         EVENT B (Donor Candidate):
         Title: {event_b.get('title')}
-        Summary: {event_b.get('summary_text', 'No summary')}
-        Entities: {event_b.get('entities', [])}
+        Date: {event_b.get('date')}
+        Key Articles:
+        {format_event_articles(event_b.get('articles', []))}
 
         TASK:
         Determine if these two events refer to the EXACT SAME specific real-world incident or story.
@@ -434,8 +466,8 @@ class CloudNewsAnalyzer:
 
         Return JSON:
         {{
-            "match": boolean,
-            "confidence": float (0.0 to 1.0),// CRITICAL: Confidence in your VERDICT.
+            "same_event": boolean,
+            "confidence_score": float (0.0 to 1.0),// CRITICAL: Confidence in your VERDICT.
                                              // 1.0 = Absolutely sure they are DIFFERENT OR Absolutely sure they are SAME.
                                              // 0.1 = Ambiguous info, unsure.
             "reasoning": "concise explanation"

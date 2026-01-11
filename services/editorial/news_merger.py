@@ -25,41 +25,79 @@ class NewsMergerScanner:
         
         # Thresholds
         self.AUTO_MERGE_THRESHOLD = 0.05 # Very strict distance (Lower is better for Cosine Distance)
-        self.PROPOSAL_THRESHOLD = 0.28    # Looser distance for proposals
+        self.PROPOSAL_THRESHOLD = 0.22    # Looser distance for proposals
+        self.RRF_THRESHOLD = 0.08         # Minimum RRF score to consider keyword-heavy matches
         self.SCAN_WINDOW_HOURS = 48      # Only check events updated recently
 
-    def run(self):
-        logger.info("🔄 News Merger Scanner started (Manual Run)...")
-        try:
-            self.scan_cycle()
-        except Exception as e:
-            logger.error(f"Merger Error: {e}")
-        logger.info("✅ Merger run complete. Exiting.")
+    async def run(self):
+        logger.info("🔄 News Merger Scanner started (Async Producer-Consumer)...")
+        
+        self.queue = asyncio.Queue(maxsize=20)
+        
+        # Start Consumers (Staggered)
+        workers = []
+        for i in range(3):
+            workers.append(asyncio.create_task(self._consumer_loop(i)))
+            await asyncio.sleep(1.0)
 
-    def scan_cycle(self):
+        while True:
+            try:
+                # Producer: Fetch Active Events updated recently
+                with self.SessionLocal() as session:
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=self.SCAN_WINDOW_HOURS)
+                    
+                    pending_subq = select(MergeProposalModel.source_event_id).where(
+                        MergeProposalModel.status == "pending",
+                        MergeProposalModel.source_event_id.is_not(None)
+                    )
+
+                    # Fetch IDs only to keep memory light
+                    stmt = (
+                        select(NewsEventModel.id)
+                        .where(
+                            NewsEventModel.is_active == True,
+                            NewsEventModel.last_updated_at >= cutoff,
+                            NewsEventModel.status == EventStatus.DRAFT,
+                            NewsEventModel.id.not_in(pending_subq)
+                        )
+                        .order_by(NewsEventModel.last_updated_at.desc())
+                    )
+                    event_ids = session.execute(stmt).scalars().all()
+
+                if not event_ids:
+                    logger.info("📭 No active events to scan. leaving")
+                    return
+
+                logger.info(f"🔍 Scanning {len(event_ids)} active events for duplicates...")
+
+                for eid in event_ids:
+                    await self.queue.put(eid)
+                
+                # Wait for the queue to drain before starting the next cycle
+                # This prevents re-scanning the same events immediately
+                await self.queue.join()
+                
+                logger.info("✅ Cycle complete. Sleeping 60s...")
+                await asyncio.sleep(60)
+
+            except Exception as e:
+                logger.error(f"Merger Producer Error: {e}")
+                await asyncio.sleep(30)
+
+    async def _consumer_loop(self, worker_id):
+        while True:
+            event_id = await self.queue.get()
+            try:
+                await asyncio.to_thread(self._process_single_event, event_id)
+            except Exception as e:
+                logger.error(f"Worker {worker_id} error on {event_id}: {e}")
+            finally:
+                self.queue.task_done()
+
+    def _process_single_event(self, event_id):
         with self.SessionLocal() as session:
-            # 1. Fetch Active Events updated recently
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=self.SCAN_WINDOW_HOURS)
-            events = session.scalars(
-                select(NewsEventModel)
-                .where(
-                    NewsEventModel.is_active == True,
-                    NewsEventModel.last_updated_at >= cutoff,
-                    NewsEventModel.status != EventStatus.DRAFT
-                )
-                .order_by(NewsEventModel.last_updated_at.desc())
-            ).all()
-
-            if not events:
-                logger.info("📭 No active events to scan in window.")
-                return
-
-            logger.info(f"🔍 Scanning {len(events)} active events for duplicates (Window: {self.SCAN_WINDOW_HOURS}h)...")
-
-            for event in events:
-                # Refresh/Check if event was merged in a previous iteration of this loop
-                if not event.is_active:
-                    continue
+            event = session.get(NewsEventModel, event_id)
+            if event and event.is_active:
                 self._check_event_duplicates(session, event)
 
     def _check_event_duplicates(self, session, event: NewsEventModel):
@@ -71,7 +109,7 @@ class NewsMergerScanner:
             query_vector=event.embedding_centroid,
             target_date=event.created_at,
             diff_date=timedelta(days=3), # Look at 3 day window
-            limit=5
+            limit=10
         )
 
         for candidate, rrf_score, vec_dist in candidates:
@@ -103,13 +141,27 @@ class NewsMergerScanner:
                 session.commit()
                 return # Event is now dead, stop scanning it
 
-            # 2. Propose (Ambiguous)
-            elif vec_dist < self.PROPOSAL_THRESHOLD:
-                logger.info(f"💡 PROPOSAL: {event.title} -> {candidate.title} (Dist: {vec_dist:.3f})")
-                self._create_proposal(session, event, candidate, vec_dist)
+            # 2. Smart Proposal Logic
+            # Condition A: Standard Vector Proximity
+            is_vector_match = vec_dist < self.PROPOSAL_THRESHOLD
+            
+            # Condition B: "Yellow Zone" - Vector is slightly off, but Keywords are very strong (High RRF)
+            # We allow a looser vector threshold if the RRF score indicates strong keyword overlap.
+            is_keyword_rescue = (vec_dist < (self.PROPOSAL_THRESHOLD + 0.08)) and (rrf_score > self.RRF_THRESHOLD)
+
+            if is_vector_match or is_keyword_rescue:
+                reason = f"Vector Dist {vec_dist:.3f}"
+                if is_keyword_rescue and not is_vector_match:
+                    reason = f"Strong Keyword Match (RRF {rrf_score:.3f}). Dist {vec_dist:.3f}"
+                
+                logger.info(f"💡 PROPOSAL: {event.title} -> {candidate.title} | {reason}")
+                self._create_proposal(session, event, candidate, vec_dist, reason)
                 session.commit()
 
-    def _create_proposal(self, session, source: NewsEventModel, target: NewsEventModel, score: float):
+    def _create_proposal(self, session, source: NewsEventModel, target: NewsEventModel, score: float, reason: str = None):
+        if not reason:
+            reason = f"MergerScanner: Vector Dist {score:.3f}"
+            
         proposal = MergeProposalModel(
             id=uuid.uuid4(),
             proposal_type="event_merge",
@@ -117,10 +169,13 @@ class NewsMergerScanner:
             target_event_id=target.id,
             similarity_score=float(score),
             status="pending",
-            reasoning=f"MergerScanner: Vector Dist {score:.3f}"
+            reasoning=reason
         )
         session.add(proposal)
 
 if __name__ == "__main__":
     scanner = NewsMergerScanner()
-    scanner.run()
+    try:
+        asyncio.run(scanner.run())
+    except KeyboardInterrupt:
+        logger.info("Merger stopped by user")

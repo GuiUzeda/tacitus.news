@@ -1,6 +1,7 @@
 from .base import BaseHarvester
 from functools import partial
-from datetime import timedelta
+from datetime import timedelta, datetime
+
 
 class MetropolesHarvester(BaseHarvester):
     def __init__(
@@ -8,7 +9,8 @@ class MetropolesHarvester(BaseHarvester):
         cutoff: timedelta = timedelta(hours=24),
     ):
         super().__init__(cutoff)
-    async def harvest(self, session, sources)-> list[dict]:
+
+    async def harvest(self, session, sources) -> list[dict]:
         url_harvesters = {
             "https://www.metropoles.com/sitemap.xml": partial(
                 self.harvest_latest_date,
@@ -16,6 +18,14 @@ class MetropolesHarvester(BaseHarvester):
             ),
         }
 
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_sitemap_url = f"https://www.metropoles.com/sitemap/noticias-{today}.xml"
+        sources.append(
+            {
+                "url": today_sitemap_url,
+                "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)",
+            }
+        )
 
         articles = []
         for source in sources:

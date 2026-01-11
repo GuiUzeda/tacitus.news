@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker, joinedload
 from loguru import logger
 
@@ -37,6 +37,74 @@ class NewsEnhancerWorker(BaseQueueWorker):
             batch_size=5,
             pending_status=JobStatus.PENDING
         )
+
+    async def run(self):
+        """
+        Overrides BaseQueueWorker.run to implement a Streaming/Producer-Consumer pattern.
+        """
+        logger.info(f"🚀 Worker started (Streaming Mode)")
+        self._reset_stuck_tasks()
+        self.queue = asyncio.Queue(maxsize=10)
+        
+        # Start Consumers (Staggered)
+        workers = []
+        for i in range(3):
+            workers.append(asyncio.create_task(self._consumer_loop(i)))
+            await asyncio.sleep(1.0)
+        
+        while True:
+            try:
+                if self.queue.full():
+                    await asyncio.sleep(1.0)
+                    continue
+
+                with self.SessionLocal() as session:
+                    jobs = self._fetch_jobs(session)
+                    
+                    if not jobs:
+                        logger.info('No more jobs found. Waiting for queue to drain...')
+                        await self.queue.join()
+                        logger.info('Queue drained. Stopping workers...')
+                        for w in workers:
+                            w.cancel()
+                        await asyncio.gather(*workers, return_exceptions=True)
+                        logger.info('All workers stopped. Exiting.')
+                        return
+                    
+                    for job in jobs:
+                        await self.queue.put(job.id)
+                        
+            except Exception as e:
+                logger.error(f"Producer Error: {e}")
+                await asyncio.sleep(5)
+
+    def _reset_stuck_tasks(self):
+        with self.SessionLocal() as session:
+            result = session.execute(
+                update(EventsQueueModel)
+                .where(
+                    EventsQueueModel.status == JobStatus.PROCESSING,
+                    EventsQueueModel.queue_name == self.queue_name
+                )
+                .values(status=JobStatus.PENDING)
+            )
+            session.commit()
+            if result.rowcount > 0:
+                logger.info(f"🧹 Reset {result.rowcount} stuck 'processing' enhancer jobs.")
+
+    async def _consumer_loop(self, worker_id):
+        while True:
+            job_id = await self.queue.get()
+            try:
+                with self.SessionLocal() as session:
+                    job = session.get(EventsQueueModel, job_id)
+                    if job:
+                        await self.process_item(session, job)
+                        session.commit()
+            except Exception as e:
+                logger.error(f"Worker {worker_id} error on job {job_id}: {e}")
+            finally:
+                self.queue.task_done()
 
     async def _analyze_wrapper(self, text: str) -> Optional[LLMNewsOutputSchema]:
         """
