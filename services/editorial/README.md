@@ -28,6 +28,7 @@ graph TD
     G -->|Auto-Match| F
     G -->|Still Ambiguous| H[CLI: Review Merges]
     H -->|Manual Resolve| F
+    L[NewsMerger] -->|Event Proposals| G
     F --> I[NewsEnhancer]
     I -->|Draft Event| J[CLI: Publisher]
     J -->|Publish| K[Front End DB]
@@ -70,11 +71,19 @@ These scripts are designed to run continuously or periodically to build up the b
     * **Unsure:** Leaves the proposal for human review in the CLI.
 * **Run:** `python news_reviewer.py`
 
+### 5. news_merger.py (The Deduplicator)
+* **Role:** Scans active events to find "Split Brain" duplicates (events that should be merged but were separated).
+* **Intelligence:** Hybrid Search (Vector + Keyword) comparing Event vs Event.
+* **Logic:**
+    * **High Confidence:** Auto-merges events immediately.
+    * **Ambiguous:** Creates an `event_merge` proposal for `news_reviewer.py`.
+* **Run:** `python news_merger.py`
+
 ## 🕹️ Part 2: The Human Loop (CLI)
 
 These steps involve high-level analysis or human finalization.
 
-### 5. news_enhancer.py (The Analyst)
+### 6. news_enhancer.py (The Analyst)
 * **Role:** Reads from ENHANCER queue. Writes the "Briefing Cards," Bias Analysis, and Stance Scoring.
 * **Intelligence:** Uses a "Large LLM" (Gemma-3-27B-IT) to:
     * Summarize individual articles (bullets).
@@ -82,7 +91,7 @@ These steps involve high-level analysis or human finalization.
     * Synthesize the "Ground News" style event summary (Left vs. Center vs. Right).
 * **Run:** `python news_enhancer.py`
 
-### 6. cli.py (The Control Room)
+### 7. cli.py (The Control Room)
 The central dashboard for the Editor.
 * **[1] Review Merges:** Resolves "Ambiguous Clusters" that news_reviewer.py couldn't handle automatically.
 * **[2] Queue Manager:** Retry failed jobs or inspect pipeline health.

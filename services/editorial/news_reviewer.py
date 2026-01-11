@@ -11,13 +11,10 @@ from sqlalchemy import create_engine, select, update, and_
 from sqlalchemy.orm import sessionmaker, joinedload
 from loguru import logger
 
-# Project Imports
-# Ensure these paths align with your project structure
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "common"))
 
+from base_worker import BaseQueueWorker
 from config import Settings
-from news_events_lib.models import MergeProposalModel, ArticleModel, NewsEventModel
+from news_events_lib.models import MergeProposalModel, ArticleModel, NewsEventModel, JobStatus
 from llm_parser import CloudNewsAnalyzer
 from news_cluster import NewsCluster
 
@@ -60,7 +57,7 @@ class TokenBucket:
                 self.tokens = 0
                 self.last_update = time.time()
 
-class NewsReviewerWorker:
+class NewsReviewerWorker(BaseQueueWorker):
     def __init__(self):
         self.settings = Settings()
         self.engine = create_engine(str(self.settings.pg_dsn), pool_pre_ping=True)
@@ -72,40 +69,26 @@ class NewsReviewerWorker:
         
         # Configuration
         self.CONFIDENCE_THRESHOLD = 0.85
-        self.CONCURRENCY_BATCH_SIZE = 5 # Number of articles to process in parallel
         
         # RATE LIMITER: 
         # Gemma-3-12b limit is ~15,000 TPM. 
         # We set it slightly lower (14k) to be safe.
         self.limiter = TokenBucket(max_tokens_per_minute=14000)
 
-    # =========================================================================
-    # CORE LOOP
-    # =========================================================================
-
-    async def run(self):
-        logger.info("🕵️ News Reviewer Worker Started (Production Optimized)")
+        # Initialize BaseWorker
+        # We use MergeProposalModel as the queue model.
+        super().__init__(
+            session_maker=self.SessionLocal,
+            queue_model=MergeProposalModel,
+            target_queue_name=None, # Not used for proposals
+            batch_size=10, # Number of ARTICLES to process per batch
+            pending_status=JobStatus.PENDING
+        )
         
-        # 1. STARTUP CLEANUP
-        # Reset any tasks that were stuck in 'processing' state due to a previous crash.
-        # This is done ONCE at startup, not inside the loop.
-        await asyncio.to_thread(self._reset_stuck_tasks)
-
-        while True:
-            try:
-                processed = await self.process_pending_proposals()
-                if processed == 0:
-                    logger.debug("No pending proposals. Sleeping...")
-                    await asyncio.sleep(60) 
-                else:
-                    # Brief pause between batches to allow context switching
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logger.critical(f"Reviewer crashed: {e}", exc_info=True)
-                await asyncio.sleep(30)
+        # Startup cleanup
+        self._reset_stuck_tasks()
 
     def _reset_stuck_tasks(self):
-        """Synchronous DB call to reset stuck tasks."""
         with self.SessionLocal() as session:
             result = session.execute(
                 update(MergeProposalModel)
@@ -116,64 +99,65 @@ class NewsReviewerWorker:
             if result.rowcount > 0:
                 logger.info(f"🧹 Reset {result.rowcount} stuck 'processing' proposals to 'pending'.")
 
-    # =========================================================================
-    # BATCH PROCESSING
-    # =========================================================================
-
-    async def process_pending_proposals(self) -> int:
-        """
-        Fetches pending articles and dispatches them to parallel workers.
-        """
-        # 1. Fetch Distinct Article IDs (Run in Thread)
-        article_ids = await asyncio.to_thread(self._fetch_pending_article_ids)
+    def _fetch_jobs(self, session):
+        # 1. Fetch Distinct Article IDs (Limit by batch_size)
+        subq = (
+            select(MergeProposalModel.source_article_id)
+            .where(MergeProposalModel.status == "pending")
+            .distinct()
+            .limit(self.batch_size)
+        )
+        article_ids = session.execute(subq).scalars().all()
         
         if not article_ids:
-            return 0
-            
-        logger.info(f"Processing batch of {len(article_ids)} articles...")
+            return []
+
+        # 2. Fetch ALL proposals for these articles and LOCK them
+        stmt = (
+            select(MergeProposalModel)
+            .where(MergeProposalModel.source_article_id.in_(article_ids))
+            .where(MergeProposalModel.status == "pending")
+            .with_for_update(skip_locked=True)
+        )
+        proposals = session.execute(stmt).scalars().all()
+
+        # 3. Mark as processing
+        for p in proposals:
+            p.status = "processing"
         
-        # 2. Parallel Processing
-        # We process in chunks defined by CONCURRENCY_BATCH_SIZE
-        total_processed = 0
-        chunk_size = self.CONCURRENCY_BATCH_SIZE
+        session.commit()
+        return proposals
+
+    async def process_items(self, session, jobs):
+        """
+        Override to handle grouping and concurrency.
+        'jobs' here is a list of MergeProposalModel objects marked as 'processing'.
+        """
+        if not jobs: return
+
+        # Group by article_id
+        # Note: jobs might be detached if session.commit() expired them. 
+        # But we just need IDs for the concurrent workers.
+        jobs.sort(key=lambda x: str(x.source_article_id))
         
-        for i in range(0, len(article_ids), chunk_size):
-            batch_ids = article_ids[i : i + chunk_size]
-            
-            # Create tasks
-            tasks = [self.process_single_article(aid) for aid in batch_ids]
-            
-            # Run concurrently
-            results = await asyncio.gather(*tasks)
-            total_processed += sum(1 for r in results if r)
-            
-        return total_processed
+        tasks = []
+        for article_id, group in groupby(jobs, key=lambda x: x.source_article_id):
+            # We pass the IDs of the proposals to the worker method
+            proposal_ids = [p.id for p in group]
+            tasks.append(self.process_single_article_concurrent(article_id, proposal_ids))
 
-    def _fetch_pending_article_ids(self) -> List[uuid.UUID]:
-        """Synchronous DB call to get IDs."""
-        with self.SessionLocal() as session:
-            stmt = (
-                select(MergeProposalModel.source_article_id)
-                .where(MergeProposalModel.status == "pending")
-                .distinct()
-                .limit(50) 
-            )
-            return list(session.execute(stmt).scalars().all())
+        # Run concurrently
+        if tasks:
+            await asyncio.gather(*tasks)
 
-    # =========================================================================
-    # SINGLE ARTICLE WORKER
-    # =========================================================================
-
-    async def process_single_article(self, article_id: uuid.UUID) -> bool:
+    async def process_single_article_concurrent(self, article_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> bool:
         """
         Orchestrates the Review -> LLM -> Write flow for one article.
         Uses asyncio.to_thread for ALL database operations to avoid blocking.
         """
         
         # --- PHASE 1: READ DATA (Threaded) ---
-        # Fetch all context strings needed for the LLM. 
-        # Returns simple dictionaries/strings, NOT attached SQLAlchemy objects.
-        work_data = await asyncio.to_thread(self._get_work_data, article_id)
+        work_data = await asyncio.to_thread(self._get_work_data, article_id, proposal_ids)
         
         if not work_data:
             return False
@@ -195,26 +179,15 @@ class NewsReviewerWorker:
             await self.limiter.consume(TOKEN_COST_PER_CALL)
 
             # Call LLM
-            # Retry logic included for transient API errors
-            result = None
-            max_retries = 3
-            
-            for attempt in range(max_retries):
-                try:
-                    result = await self.llm.verify_event_match(
-                        prop['event_context'], 
-                        article_context['context_str']
-                    )
-                    break
-                except Exception as e:
-                    msg = str(e)
-                    if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "503" in msg:
-                        wait_time = 5.0 + (attempt * 5)
-                        logger.warning(f"⚠️ API Overload. Sleeping {wait_time}s...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"LLM Error: {e}")
-                        break
+            # Retry logic is handled by @with_retry in llm_parser.py
+            try:
+                result = await self.llm.verify_event_match(
+                    prop['event_context'], 
+                    article_context['context_str']
+                )
+            except Exception as e:
+                logger.error(f"LLM Verification Failed after retries: {e}")
+                result = None
             
             if not result:
                 all_rejected = False # Error occurred, play it safe
@@ -266,7 +239,7 @@ class NewsReviewerWorker:
     # SYNCHRONOUS DB HELPERS (Run in Threads)
     # =========================================================================
 
-    def _get_work_data(self, article_id: uuid.UUID) -> Optional[Tuple[Dict, List[Dict]]]:
+    def _get_work_data(self, article_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> Optional[Tuple[Dict, List[Dict]]]:
         """
         Fetches all necessary data to process an article.
         Checks if the article is already merged (optimization).
@@ -285,7 +258,7 @@ class NewsReviewerWorker:
                 session.execute(
                     update(MergeProposalModel)
                     .where(
-                        MergeProposalModel.source_article_id == article_id,
+                        MergeProposalModel.id.in_(proposal_ids),
                         MergeProposalModel.status == "pending"
                     )
                     .values(status="rejected", reasoning="Auto-Cleanup: Article already merged.")
@@ -301,8 +274,7 @@ class NewsReviewerWorker:
                     joinedload(MergeProposalModel.target_event).joinedload(NewsEventModel.articles).joinedload(ArticleModel.contents)
                 )
                 .where(
-                    MergeProposalModel.source_article_id == article_id,
-                    MergeProposalModel.status == "pending"
+                    MergeProposalModel.id.in_(proposal_ids)
                 )
                 .order_by(MergeProposalModel.similarity_score.desc())
             )

@@ -1,6 +1,7 @@
 import asyncio
 import uuid
-import numpy as np
+import sys
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from loguru import logger
@@ -25,6 +26,9 @@ from models import (
 )
 from config import Settings
 
+
+from base_worker import BaseQueueWorker
+from event_aggregator import EventAggregator
 
 @dataclass
 class ClusterResult:
@@ -370,55 +374,21 @@ class NewsCluster:
         session.execute(select(NewsEventModel.id).where(NewsEventModel.id == event.id).with_for_update())
         session.refresh(event)
 
-        # 1. Update Centroid & Basic Stats
-        current_centroid = np.array(event.embedding_centroid)
-        new_vector = np.array(vector)
-        n = event.article_count
-        updated_centroid = ((current_centroid * n) + new_vector) / (n + 1)
-
-        event.embedding_centroid = updated_centroid.tolist()
+        # 1. Update Centroid
+        EventAggregator.update_centroid(event, vector)
+        
+        # 2. Update Basic Stats
         event.article_count += 1
         event.last_updated_at = datetime.now(timezone.utc)
         
-
         if event.search_text:
             event.search_text += f" {article.title}"
 
-        # 2. Aggregate Interests (Entities)
-        # Structure: {"person": {"Macron": 5}, "place": {"Paris": 2}}
-        if article.interests:
-            # Create a copy to ensure SQLAlchemy detects the JSON mutation
-            current_counts = dict(event.interest_counts or {})
+        # 3. Aggregate Interests
+        EventAggregator.aggregate_interests(event, article.interests)
 
-            for category, items in article.interests.items():
-                if category not in current_counts:
-                    current_counts[category] = {}
-
-                for item in items:
-                    current_counts[category][item] = (
-                        current_counts[category].get(item, 0) + 1
-                    )
-
-            event.interest_counts = current_counts
-
-        # 3. Aggregate Newspaper Metadata
-        # We rely on lazy loading for article.newspaper (Session is active)
-        if article.newspaper:
-            # Bias Distribution: {"left": 10, "center": 5}
-            if article.newspaper.bias:
-                bias = article.newspaper.bias
-                bias_dist = dict(event.bias_distribution or {})
-                news_bias_dist = set(bias_dist.get(bias, []))
-                news_bias_dist.add(str(article.newspaper.id))
-                bias_dist[bias] = list(news_bias_dist)
-                event.bias_distribution = bias_dist
-
-            # Ownership Stats: {"Conglomerate": 1}
-            if article.newspaper.ownership_type:
-                otype = article.newspaper.ownership_type
-                own_stats = dict(event.ownership_stats or {})
-                own_stats[otype] = own_stats.get(otype, 0) + 1
-                event.ownership_stats = own_stats
+        # 4. Aggregate Newspaper Metadata (Bias/Ownership)
+        EventAggregator.aggregate_metadata(event, article)
 
         # 5. Link
         article.event_id = event.id
@@ -464,13 +434,13 @@ class NewsCluster:
             ownership_stats=init_ownership,
         )
         session.add(new_event)
-        session.commit()  # Immediate commit to reserve ID
+        session.flush()  # Generate ID without breaking transaction
 
         # 3. Link Article
         article = session.merge(article)
         article.event_id = new_event.id
         session.add(article)
-        session.commit()
+        session.flush()
 
         logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
         return new_event.id
@@ -503,88 +473,76 @@ class NewsCluster:
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
 
-    async def run(self):
-        while True:
-            # 1. Fetch Batch (Locking)
-            with self.SessionLocal() as session:
-                # add cont to the queue
-                stmt = (
-                    select(ArticleModel, ArticlesQueueModel)
-                    .join(
-                        ArticlesQueueModel,
-                        ArticlesQueueModel.article_id == ArticleModel.id,
-                    )
-                    .where(ArticlesQueueModel.status == JobStatus.PENDING)
-                    .where(ArticlesQueueModel.queue_name == ArticlesQueueName.CLUSTER)
-                    .order_by(ArticleModel.published_date.asc())
-                    .limit(100)
-                    .with_for_update(skip_locked=True)
-                )
-                result = session.execute(stmt).all()
+class NewsClusterWorker(BaseQueueWorker):
+    def __init__(self):
+        self.settings = Settings()
+        self.engine = create_engine(str(self.settings.pg_dsn))
+        self.SessionLocal = sessionmaker(
+            autocommit=False, autoflush=False, bind=self.engine, expire_on_commit=False
+        )
+        self.cluster = NewsCluster()
+        
+        super().__init__(
+            session_maker=self.SessionLocal,
+            queue_model=ArticlesQueueModel,
+            target_queue_name=ArticlesQueueName.CLUSTER,
+            batch_size=100,
+            pending_status=JobStatus.PENDING
+        )
 
-                if not result:
-                    logger.info("Cluster queue empty. Sleeping...")
-                    await asyncio.sleep(10)
-                    continue
+    def _fetch_jobs(self, session):
+        # Override to join with ArticleModel
+        stmt = (
+            select(ArticlesQueueModel, ArticleModel)
+            .join(ArticleModel, ArticlesQueueModel.article_id == ArticleModel.id)
+            .where(ArticlesQueueModel.status == self.pending_status)
+            .where(ArticlesQueueModel.queue_name == self.queue_name)
+            .order_by(ArticleModel.published_date.asc())
+            .limit(self.batch_size)
+            .with_for_update(skip_locked=True)
+        )
+        rows = session.execute(stmt).all()
+        
+        jobs = []
+        for queue_item, article in rows:
+            queue_item.status = JobStatus.PROCESSING
+            queue_item.updated_at = datetime.now(timezone.utc)
+            queue_item.article = article 
+            jobs.append(queue_item)
+            
+        session.commit()
+        return jobs
 
-                for _, queue in result:
-                    queue.status = JobStatus.PROCESSING
-                session.commit()
+    async def process_item(self, session, job):
+        try:
+            article = job.article
+            
+            decision: ClusterResult = self.cluster.cluster_existing_article(
+                session, article
+            )
 
-            # 2. Process Batch
-            with self.SessionLocal() as session:
-                for article, queue in result:
-                    try:
-                        article = session.merge(article)
-                        queue = session.merge(queue)
+            if decision.action in ["MERGE", "NEW"]:
+                # The event creation/linking happened inside cluster_existing_article
+                # We just need to trigger enhancement and mark queue completed.
+                if decision.event_id:
+                    self.cluster._trigger_event_enhancement(session, decision.event_id)
+                
+                job.status = JobStatus.COMPLETED
+                logger.success(f"Action {decision.action}: {article.title[:20]} -> ENHANCE")
 
-                        decision: ClusterResult = self.cluster_existing_article(
-                            session, article
-                        )
+            elif decision.action in ["PROPOSE", "PROPOSE_MULTI"]:
+                job.status = JobStatus.COMPLETED
+                job.msg = f"Parked: {decision.reason}"
+                logger.warning(f"Action {decision.action}: {article.title} -> PARKED")
 
-                        if decision.action in ["MERGE", "NEW"]:
-                            # Use helper methods to finalize queues
-                            # Note: decision.event_id is already set by the internal methods
-                            self._mark_article_queue_completed(session, article.id)
-                            if decision.event_id:
-                                self._trigger_event_enhancement(
-                                    session, decision.event_id
-                                )
-
-                            logger.success(
-                                f"Action {decision.action}: {article.title[:20]} -> ENHANCE"
-                            )
-
-                        elif decision.action in ["PROPOSE", "PROPOSE_MULTI"]:
-                            queue.status = JobStatus.COMPLETED
-                            queue.msg = f"Parked: {decision.reason}"
-                            logger.warning(
-                                f"Action {decision.action}: {article.title} -> PARKED"
-                            )
-
-                        else:
-                            queue.status = JobStatus.FAILED
-                            queue.msg = f"Unknown Action: {decision.action}"
-
-                        queue.updated_at = datetime.now(timezone.utc)
-                        session.commit()
-
-                    except Exception as e:
-                        logger.error(
-                            f"Cluster failed for {getattr(article, 'title', 'Unknown')}: {e}"
-                        )
-                        session.rollback()
-                        try:
-                            queue = session.merge(queue)
-                            queue.status = JobStatus.FAILED
-                            queue.msg = str(e)
-                            session.commit()
-                        except:
-                            pass
-
-                logger.success(f"Processed batch of {len(result)} articles.")
-
+            else:
+                job.status = JobStatus.FAILED
+                job.msg = f"Unknown Action: {decision.action}"
+        except Exception as e:
+            logger.error(f"Error processing article {job.article_id}: {e}")
+            session.rollback()
+            raise e
 
 if __name__ == "__main__":
-    cluster = NewsCluster()
-    asyncio.run(cluster.run())
+    worker = NewsClusterWorker()
+    asyncio.run(worker.run())

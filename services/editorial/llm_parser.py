@@ -3,6 +3,7 @@ import os
 import json
 import re
 import asyncio
+from functools import wraps
 from loguru import logger
 from typing import Dict, List, Optional, Any
 from google import genai
@@ -16,6 +17,47 @@ from config import Settings
 settings = Settings()
 client = genai.Client(api_key=settings.gemini_api_key)
 
+# --- Decorators ---
+
+def with_retry(max_retries=3, base_delay=5):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    msg = str(e).lower()
+                    # Check for rate limit or transient errors
+                    is_429 = "429" in msg or "resource_exhausted" in msg
+                    is_503 = "503" in msg or "unavailable" in msg
+
+                    if is_429 or is_503:
+                        if attempt == max_retries - 1:
+                            raise e # Re-raise on last attempt
+                        
+                        # Exponential backoff with jitter could be added, here we use simple linear/exp mix
+                        wait = base_delay * (2 ** attempt) 
+                        
+                        # Check for specific retry delay in message
+                        match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
+                        if match:
+                            try:
+                                wait = float(match.group(1)) + 1.0
+                            except ValueError:
+                                pass
+                        
+                        if is_429:
+                            logger.warning(f"⚠️ API Rate Limit (429). Retrying in {wait:.2f}s...")
+                        else:
+                            logger.warning(f"⚠️ API Service Unavailable (503). Retrying in {wait:.2f}s...")
+                        await asyncio.sleep(wait)
+                    else:
+                        raise e # Non-transient error, raise immediately
+            return None
+        return wrapper
+    return decorator
+
 # --- Pydantic Schemas ---
 
 class LLMNewsOutputSchema(BaseModel):
@@ -23,6 +65,8 @@ class LLMNewsOutputSchema(BaseModel):
     key_points: List[str]
     stance: float 
     stance_reasoning: str
+    clickbait_score: float
+    clickbait_reasoning: str
     entities: Dict[str, List[str]]
     main_topics: List[str]
 
@@ -50,6 +94,7 @@ class CloudNewsFilter:
         # The "Intern" Model
         self.model_id = "gemma-3-4b-it"
 
+    @with_retry(max_retries=5, base_delay=10)
     async def filter_batch(self, articles_title: List[dict]) -> List[int]:
         """
         Takes a list of 50 raw entries. Returns ONLY the relevant ones.
@@ -127,6 +172,7 @@ class CloudNewsAnalyzer:
         # The "Senior" Model
         self.model_id = "gemma-3-27b-it"
 
+    @with_retry(max_retries=3, base_delay=5)
     async def verify_event_match(self, reference_text: str, candidate_text: str) -> EventMatchSchema | None:
         """
         Determines if two texts refer to the EXACT same real-world event 
@@ -206,6 +252,7 @@ class CloudNewsAnalyzer:
         valid_results = [r for r in results if r is not None]
         return valid_results
 
+    @with_retry(max_retries=3, base_delay=5)
     async def analyze_article(self, text: str) -> LLMNewsOutputSchema | None:
         today_context = datetime.now().strftime("%A, %d de %B de %Y")
         prompt = f"""
@@ -239,6 +286,8 @@ class CloudNewsAnalyzer:
             ],
             "stance": 0.5,
             "stance_reasoning": "Short markdown reasoning for the stance",
+            "clickbait_score": 0.1,
+            "clickbait_reasoning": "Short markdown reasoning for the click-bait score",
             "entities": {{
                 "person": ["Full Name 1"],
                 "place": ["City", "Country"],
@@ -251,6 +300,9 @@ class CloudNewsAnalyzer:
         **STANCE GUIDE:**
         - **Ranges from -1.0 (critical/negative) to 1.0 (supportive/positive).**
         - **0.0** is completely neutral/informational.
+        
+        **CLICKBAIT GUIDE:**
+        - **Ranges from 0.0 (the title is factual and matches the facts) to 1.0 (the title is a clickbait)
         
         **Always answer in portuguese.**
         """
@@ -276,9 +328,12 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return None
         except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+                raise e
             logger.error(f"CloudNewsAnalyzer Error: {e}")
             return None
 
+    @with_retry(max_retries=3, base_delay=5)
     async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> dict | None:
         """
         Takes a list of article summaries (grouped by bias) and generates
@@ -347,9 +402,12 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return None 
         except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+                raise e
             logger.error(f"Event summarization failed: {e}")
             return None
         
+    @with_retry(max_retries=3, base_delay=5)
     async def verify_event_merge(self, event_a: Dict, event_b: Dict) :
         """
         Verify if TWO EVENTS represent the exact same incident.

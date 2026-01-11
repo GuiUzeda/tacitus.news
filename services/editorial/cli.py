@@ -20,8 +20,9 @@ from models import (
     JobStatus,
     EventsQueueName,
 )
-from news_events_lib.models import ArticleModel, NewsEventModel, MergeProposalModel
+from news_events_lib.models import ArticleModel, NewsEventModel, MergeProposalModel, EventStatus
 from news_cluster import NewsCluster
+from nlp_service import NLPService
 
 console = Console()
 settings = Settings()
@@ -32,6 +33,7 @@ SessionLocal = sessionmaker(bind=engine)
 class EditorialCLI:
     def __init__(self):
         self.cluster_service = NewsCluster()
+        self.nlp_service = NLPService()
 
     def start(self):
         while True:
@@ -45,15 +47,20 @@ class EditorialCLI:
                 failed_arts = session.query(ArticlesQueueModel).filter_by(status=JobStatus.FAILED).count()
                 failed_evts = session.query(EventsQueueModel).filter_by(status=JobStatus.FAILED).count()
                 active_events = session.query(NewsEventModel).filter_by(is_active=True).count()
+                ready_to_publish = session.query(EventsQueueModel).filter_by(
+                    queue_name=EventsQueueName.PUBLISHER, 
+                    status=JobStatus.PENDING
+                ).count()
 
             console.print(f"[1] 🕵️  Review Merges ({pending_props} pending)")
             console.print(f"[2] 🚑 Queue Manager (Arts: {failed_arts}, Evts: {failed_evts} failed)")
             console.print(f"[3] 🔎 Manual Search & Link")
             console.print(f"[4] 📖 Inspect Event/Article (ID Search)")
             console.print(f"[5] 🔗 Find & Merge Duplicate Events (Total: {active_events})")
+            console.print(f"[6] 🚀 Publishing Review ({ready_to_publish} ready)")
             console.print(f"[q] Quit")
 
-            choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "q"])
+            choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "6", "q"])
 
             if choice == "1":
                 self.review_merges()
@@ -65,6 +72,8 @@ class EditorialCLI:
                 self.inspect_tool()
             elif choice == "5":
                 self.merge_duplicate_events()
+            elif choice == "6":
+                self.publishing_review()
             elif choice == "q":
                 console.print("Bye! 👋")
                 sys.exit(0)
@@ -75,25 +84,67 @@ class EditorialCLI:
                 select(MergeProposalModel)
                 .options(
                     joinedload(MergeProposalModel.source_article),
+                    joinedload(MergeProposalModel.source_event),
                     joinedload(MergeProposalModel.target_event),
                 )
                 .where(MergeProposalModel.status == "pending")
                 .order_by(
-                    MergeProposalModel.source_article_id,
-                    MergeProposalModel.similarity_score,
+                    MergeProposalModel.similarity_score.desc(),
                 )
             )
             all_proposals = session.execute(stmt).scalars().all()
 
         if not all_proposals:
-            console.print("[green]No pending merges![/green]")
+            console.print(Panel("✅ No pending merges found.", style="green"))
             Prompt.ask("Press Enter to return")
             return
 
+        # Split proposals
+        article_props = [p for p in all_proposals if p.source_article_id]
+        event_props = [p for p in all_proposals if p.source_event_id]
+
+        while True:
+            console.clear()
+            console.rule("🕵️  Review Merges Dashboard")
+            
+            # Summary Grid
+            grid = Table.grid(expand=True, padding=(0, 2))
+            grid.add_column(justify="center", ratio=1)
+            grid.add_column(justify="center", ratio=1)
+            
+            p1 = Panel(f"[bold cyan]{len(article_props)}[/bold cyan]\nPending Article Links", title="📄 Articles", border_style="cyan")
+            p2 = Panel(f"[bold magenta]{len(event_props)}[/bold magenta]\nPending Event Merges", title="🔗 Events", border_style="magenta")
+            grid.add_row(p1, p2)
+            console.print(grid)
+            console.print()
+
+            choices = []
+            if article_props: choices.append("1")
+            if event_props: choices.append("2")
+            choices.append("q")
+
+            console.print("[1] Review Articles" if article_props else "[dim][1] Review Articles (Empty)[/dim]")
+            console.print("[2] Review Events" if event_props else "[dim][2] Review Events (Empty)[/dim]")
+            console.print("[q] Back")
+
+            choice = Prompt.ask("Select", choices=choices, default="1" if article_props else "q")
+
+            if choice == "1" and article_props:
+                self._review_article_merges(article_props)
+                return 
+            elif choice == "2" and event_props:
+                self._review_event_merges(event_props)
+                return
+            elif choice == "q":
+                return
+
+    def _review_article_merges(self, proposals):
         from itertools import groupby
+        # Sort by article ID for grouping
+        proposals.sort(key=lambda x: str(x.source_article_id))
         grouped_props = {
             k: list(v)
-            for k, v in groupby(all_proposals, key=lambda x: x.source_article)
+            for k, v in groupby(proposals, key=lambda x: x.source_article)
             if k is not None
         }
 
@@ -176,6 +227,91 @@ class EditorialCLI:
                     return "next"
                 continue
 
+    def _review_event_merges(self, proposals):
+        from itertools import groupby
+        # Sort by source event id first for groupby
+        proposals.sort(key=lambda x: str(x.source_event_id))
+        
+        grouped = {
+            k: list(v)
+            for k, v in groupby(proposals, key=lambda x: x.source_event)
+            if k is not None
+        }
+        
+        total = len(grouped)
+        idx = 0
+        for source_event, props in grouped.items():
+            idx += 1
+            if self._handle_single_event_review(source_event, props, idx, total) == "quit":
+                break
+
+    def _handle_single_event_review(self, source, props, idx, total):
+        while True:
+            console.clear()
+            console.rule(f"🔗 Event Merge Review {idx}/{total}", style="magenta")
+
+            # Source Event Display
+            source_text = f"[bold]{source.title}[/bold]\n"
+            source_text += f"[dim]ID: {source.id}[/dim]\n"
+            source_text += f"📅 {source.created_at.strftime('%Y-%m-%d')} | 📰 {source.article_count} Articles"
+            if source.summary and isinstance(source.summary, dict):
+                s = source.summary.get('center') or source.summary.get('bias') or ""
+                source_text += f"\n\n[italic]{textwrap.shorten(s, width=150)}[/italic]"
+            
+            console.print(Panel(source_text, title="🔻 SOURCE EVENT (To be dissolved)", border_style="red"))
+
+            # Candidates Table
+            table = Table(show_header=True, header_style="bold magenta", title="Target Candidates (Master)")
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Target Event")
+            table.add_column("Score", justify="right")
+            table.add_column("Reason")
+            table.add_column("Stats")
+
+            for i, p in enumerate(props):
+                target = p.target_event
+                score_color = "green" if p.similarity_score < 0.15 else "yellow"
+                stats = f"{target.article_count} arts"
+                table.add_row(
+                    str(i + 1),
+                    target.title,
+                    f"[{score_color}]{p.similarity_score:.3f}[/{score_color}]",
+                    p.reasoning or "",
+                    stats
+                )
+            console.print(table)
+
+            # Actions
+            menu_text = (
+                f"[bold green]1-{len(props)}[/bold green] : Merge Source into Target #\n"
+                "[bold red]r[/bold red]   : Reject All (Keep Separate)\n"
+                "[bold blue]i #[/bold blue] : Inspect Target Event\n"
+                "[dim]skip[/dim]: Skip\n"
+                "[dim]q[/dim]   : Quit"
+            )
+            console.print(Panel(menu_text, title="Actions", expand=False))
+
+            choice = Prompt.ask("Decision").lower().strip()
+
+            if choice == "q": return "quit"
+            if choice == "skip": return "next"
+            
+            if choice == "r":
+                self._reject_event_merge(props)
+                return "next"
+
+            if choice.startswith("i "):
+                try:
+                    idx_to_inspect = int(choice.split(" ")[1]) - 1
+                    if 0 <= idx_to_inspect < len(props):
+                        self._inspect_event_deep_dive(props[idx_to_inspect].target_event.id)
+                        continue
+                except: pass
+
+            if choice.isdigit() and 1 <= int(choice) <= len(props):
+                self._execute_event_merge_cli(props[int(choice) - 1])
+                return "next"
+
     # --- EXECUTION (DELEGATED TO CLUSTER SERVICE) ---
 
     def _execute_merge(self, proposal):
@@ -207,6 +343,39 @@ class EditorialCLI:
             console.print("[blue]🆕 New Event Created and Queued![/blue]")
             time.sleep(1)
 
+    def _execute_event_merge_cli(self, proposal):
+        with SessionLocal() as session:
+            # Re-fetch
+            prop = session.get(MergeProposalModel, proposal.id)
+            source = session.get(NewsEventModel, prop.source_event_id)
+            target = session.get(NewsEventModel, prop.target_event_id)
+
+            if not source or not target:
+                console.print("[red]Objects missing.[/red]")
+                return
+
+            self.cluster_service.execute_event_merge(session, source, target)
+            
+            # Update proposal status manually since cluster service doesn't know about this specific proposal ID
+            prop.status = "approved"
+            prop.reasoning = "Manual CLI Approval"
+            session.add(prop)
+            
+            session.commit()
+            console.print(f"[green]✅ Merged '{source.title}' into '{target.title}'[/green]")
+            time.sleep(1.5)
+
+    def _reject_event_merge(self, proposals):
+        with SessionLocal() as session:
+            for p in proposals:
+                db_p = session.get(MergeProposalModel, p.id)
+                if db_p:
+                    db_p.status = "rejected"
+                    db_p.reasoning = "Manual CLI Rejection"
+            session.commit()
+            console.print("[yellow]🚫 Proposals rejected. Events kept separate.[/yellow]")
+            time.sleep(1)
+
     def manual_search(self, article=None):
         console.clear()
         console.rule("🔎 Manual Search & Link")
@@ -214,7 +383,7 @@ class EditorialCLI:
         with SessionLocal() as session:
             if not article:
                 query = Prompt.ask("Enter search query")
-                vector = [0.0] * 768
+                vector = self.nlp_service.calculate_vector(query)
             else:
                 article_db = session.get(ArticleModel, article.id)
                 if not article_db: return False
@@ -381,6 +550,92 @@ class EditorialCLI:
                     session.commit()
                     console.print(f"[green]Cleared completed jobs.[/green]")
                     time.sleep(1)
+
+    # --- PUBLISHING REVIEW ---
+
+    def publishing_review(self):
+        with SessionLocal() as session:
+            # Fetch jobs from Publisher Queue
+            stmt = (
+                select(EventsQueueModel)
+                .options(joinedload(EventsQueueModel.event).joinedload(NewsEventModel.articles))
+                .where(
+                    EventsQueueModel.queue_name == EventsQueueName.PUBLISHER,
+                    EventsQueueModel.status == JobStatus.PENDING
+                )
+                .order_by(EventsQueueModel.created_at.asc())
+            )
+            jobs = session.execute(stmt).scalars().all()
+
+        if not jobs:
+            console.print(Panel("✅ No events waiting for publication.", style="green"))
+            Prompt.ask("Press Enter to return")
+            return
+
+        total = len(jobs)
+        for i, job in enumerate(jobs):
+            if self._handle_single_publish_review(job, i + 1, total) == "quit":
+                break
+
+    def _handle_single_publish_review(self, job, idx, total):
+        event = job.event
+        while True:
+            console.clear()
+            console.rule(f"🚀 Publishing Review {idx}/{total}")
+            
+            # Display Event
+            console.print(f"[bold size=16]{event.title}[/bold size=16]")
+            console.print(f"ID: {event.id} | Articles: {event.article_count}")
+            
+            # Summary
+            if event.summary and isinstance(event.summary, dict):
+                # Prefer center/neutral summary
+                summary_text = event.summary.get("center") or event.summary.get("bias") or str(event.summary)
+                console.print(Panel(Markdown(summary_text), title="Generated Briefing", border_style="blue"))
+            
+            # Stance/Stats
+            if event.stance_distribution:
+                console.print(f"[yellow]Stance Dist:[/yellow] {event.stance_distribution}")
+            
+            # Menu
+            console.print("\n[bold green]p[/bold green] : Publish (Live)")
+            console.print("[bold red]a[/bold red] : Archive (Reject)")
+            console.print("[bold yellow]e[/bold yellow] : Edit Title")
+            console.print("[dim]skip[/dim]: Skip")
+            console.print("[dim]q[/dim]   : Quit")
+            
+            choice = Prompt.ask("Action").lower().strip()
+            
+            if choice == "q": return "quit"
+            if choice == "skip": return "next"
+            
+            if choice == "p":
+                self._execute_publish_action(job.id, event.id, EventStatus.PUBLISHED)
+                return "next"
+            
+            if choice == "a":
+                self._execute_publish_action(job.id, event.id, EventStatus.ARCHIVED)
+                return "next"
+                
+            if choice == "e":
+                new_title = Prompt.ask("New Title", default=event.title)
+                with SessionLocal() as session:
+                    e = session.get(NewsEventModel, event.id)
+                    e.title = new_title
+                    session.commit()
+                    event.title = new_title # Update local object for display
+
+    def _execute_publish_action(self, job_id, event_id, new_status):
+        with SessionLocal() as session:
+            job = session.get(EventsQueueModel, job_id)
+            event = session.get(NewsEventModel, event_id)
+            if job and event:
+                event.status = new_status
+                event.is_active = (new_status == EventStatus.PUBLISHED)
+                job.status = JobStatus.COMPLETED
+                session.commit()
+                console.print(f"[green]✅ Set to {new_status.value}![/green]")
+                time.sleep(1)
 
     # --- TOOLS ---
 

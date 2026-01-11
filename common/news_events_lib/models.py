@@ -100,6 +100,8 @@ class NewsEventModel(BaseModel):
     stance_distribution: Mapped[Dict[str, Dict[str, int]]] = mapped_column(
         JSONB, default=dict
     )
+    clickbait_distribution: Mapped[Dict[str, float]] = mapped_column(JSONB, default=dict)
+    article_counts_by_bias: Mapped[Dict[str, int]] = mapped_column(JSONB, default=dict)
 
     last_summarized_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     articles_at_last_summary: Mapped[int] = mapped_column(Integer, default=0)
@@ -171,6 +173,8 @@ class ArticleModel(BaseModel):
 
     stance: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stance_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    clickbait_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    clickbait_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     main_topics: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
     entities: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
     
