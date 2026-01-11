@@ -33,8 +33,12 @@
     "description": "",
     "feeds": [
       {
-        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/)",
+        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/internacional/)",
         "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap-index-by-day/?outputType=xml"
+      },
+      {
+        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/internacional/))",
+        "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap/latest/?outputType=xml"
       }
     ]
   },

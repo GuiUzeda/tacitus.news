@@ -349,3 +349,62 @@ class CloudNewsAnalyzer:
         except Exception as e:
             logger.error(f"Event summarization failed: {e}")
             return None
+        
+    async def verify_event_merge(self, event_a: Dict, event_b: Dict) :
+        """
+        Verify if TWO EVENTS represent the exact same incident.
+        """
+        prompt = f"""
+        You are a Senior Editor responsible for deduplication. 
+        I have two event clusters that might refer to the same real-world incident.
+
+        EVENT A (Master Candidate):
+        Title: {event_a.get('title')}
+        Summary: {event_a.get('summary_text', 'No summary')}
+        Entities: {event_a.get('entities', [])}
+
+        EVENT B (Donor Candidate):
+        Title: {event_b.get('title')}
+        Summary: {event_b.get('summary_text', 'No summary')}
+        Entities: {event_b.get('entities', [])}
+
+        TASK:
+        Determine if these two events refer to the EXACT SAME specific real-world incident or story.
+        - "Tax Reform passed" vs "Congress votes on VAT" -> SAME (High Confidence)
+        - "Earthquake in Chile" vs "Earthquake in Japan" -> DIFFERENT
+        - "Market Crash" vs "Tech Stocks Fall" -> SAME (if context matches)
+
+        Return JSON:
+        {{
+            "match": boolean,
+            "confidence": float (0.0 to 1.0),// CRITICAL: Confidence in your VERDICT.
+                                             // 1.0 = Absolutely sure they are DIFFERENT OR Absolutely sure they are SAME.
+                                             // 0.1 = Ambiguous info, unsure.
+            "reasoning": "concise explanation"
+        }}
+        """
+        response = None
+        try:
+            response = await client.aio.models.generate_content(
+                model="gemma-3-12b-it",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,  # Zero temp for maximum deterministic logic
+                ),
+            )
+            
+            text_response = response.text
+            if not text_response:
+                return None
+
+            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
+            return EventMatchSchema.model_validate_json(clean_text)
+
+        except pydantic.ValidationError as e:
+            logger.error(f"Event Verification Schema Error: {e}")
+            return None
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+                raise e
+            logger.error(f"Event Verification Error: {e}")
+            return None 

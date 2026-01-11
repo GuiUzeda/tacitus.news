@@ -90,7 +90,8 @@ class NewsGetter:
         )
         # Warmup to initialize lazy buffers (Rotary Embeddings) before multi-threaded use
         # This prevents race conditions where _sin_cached is None during concurrent forward passes
-        self.embedder.encode("warmup")
+        # We use a text longer than our truncation limit (3000 chars) to ensure buffers are fully allocated.
+        self.embedder.encode("warmup " * 1000)
         
         # 2. NER Model (SpaCy)
         try:
