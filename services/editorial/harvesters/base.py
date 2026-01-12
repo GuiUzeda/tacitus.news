@@ -23,9 +23,20 @@ class BaseHarvester:
         # Only accept news from the last 24h (Crucial for Indexes)
         self.cutoff_date = datetime.now(timezone.utc) - cutoff
         
+        # Expanded User Agent List for Rotation
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
+        ]
+
         # Standard Headers to mimic a real browser
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": self.user_agents[0],
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": "https://www.google.com/",
@@ -322,16 +333,30 @@ class BaseHarvester:
         allowed_sections=None,
     ) -> list[dict]:
         """ Standard Sitemap Fetcher (XML) """
-        try:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=120), headers=self.headers
-            ) as response:
-                if response.status != 200:
-                    logger.error(f"Response Error {url}: {response.status}")
-                    return []
-                xml_content = await response.read()
-        except Exception as e:
-            logger.warning(f"Sitemap fail {url}: {e}")
+        xml_content = None
+        
+        for agent in self.user_agents:
+            try:
+                headers = self.headers.copy()
+                headers["User-Agent"] = agent
+                
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=120), headers=headers
+                ) as response:
+                    if response.status == 200:
+                        xml_content = await response.read()
+                        break
+                    elif response.status == 403:
+                        logger.warning(f"403 Forbidden on {url} with UA {agent[:20]}... Rotating.")
+                        continue
+                    else:
+                        logger.error(f"Response Error {url}: {response.status}")
+                        return []
+            except Exception as e:
+                logger.warning(f"Sitemap fail {url} with UA {agent[:20]}: {e}")
+                continue
+
+        if not xml_content:
             return []
             
         soup = BeautifulSoup(xml_content, "xml")

@@ -1,13 +1,14 @@
 import json
 import os
 import sys
+import numpy as np
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings
-from common.news_events_lib.models import NewspaperModel, FeedModel
+from news_events_lib.models import NewspaperModel, FeedModel
 
 def seed_feeds():
     settings = Settings()
@@ -32,7 +33,9 @@ def seed_feeds():
                     bias=np_data.get("bias"),
                     ownership_type=np_data.get("ownership_type", ""),
                     icon_url=np_data.get("icon_url"),
-                    logo_url=np_data.get("logo_url")
+                    logo_url=np_data.get("logo_url"),
+                    description=np_data.get("description", ""),
+             
                 )
                 session.add(newspaper)
                 session.flush()

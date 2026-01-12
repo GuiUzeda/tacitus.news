@@ -134,7 +134,7 @@ class NewsMergerDomain:
             source_event_id=source.id,
             target_event_id=target.id,
             distance_score=float(score),
-            status="pending",
+            status=JobStatus.PENDING,
             reasoning=reason
         )
         session.add(proposal)

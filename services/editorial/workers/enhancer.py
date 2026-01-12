@@ -102,7 +102,7 @@ class NewsEnhancerWorker(BaseQueueWorker):
                 MergeProposalModel.source_event_id == NewsEventModel.id,
                 MergeProposalModel.target_event_id == NewsEventModel.id
             ),
-            MergeProposalModel.status.in_(['pending', 'processing'])
+            MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
         )
 
         stmt = (

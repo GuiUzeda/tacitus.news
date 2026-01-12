@@ -61,7 +61,7 @@ class NewsMergerWorker:
             
             # Subquery: Already has pending proposals?
             pending_subq = select(MergeProposalModel.source_event_id).where(
-                MergeProposalModel.status == "pending",
+                MergeProposalModel.status == JobStatus.PENDING,
                 MergeProposalModel.source_event_id.is_not(None)
             )
 

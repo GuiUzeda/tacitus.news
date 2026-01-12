@@ -65,9 +65,9 @@ class NewsCluster:
             .where(
                 MergeProposalModel.source_article_id == article.id,
                 MergeProposalModel.target_event_id != event.id,
-                MergeProposalModel.status == "pending",
+                MergeProposalModel.status == JobStatus.PENDING,
             )
-            .values(status="rejected")
+            .values(status=JobStatus.REJECTED)
         )
         session.execute(
             update(MergeProposalModel)
@@ -75,7 +75,7 @@ class NewsCluster:
                 MergeProposalModel.source_article_id == article.id,
                 MergeProposalModel.target_event_id == event.id,
             )
-            .values(status="approved")
+            .values(status=JobStatus.APPROVED)
         )
 
         self._mark_article_queue_completed(session, article.id)
@@ -92,7 +92,7 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.source_article_id == article.id)
-            .values(status="rejected")
+            .values(status=JobStatus.REJECTED)
         )
 
         self._mark_article_queue_completed(session, article.id)
@@ -166,7 +166,7 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
-            .values(status="rejected", reasoning="Target event was merged.")
+            .values(status=JobStatus, reasoning="Target event was merged.")
         )
         # Remove jobs pendentes do evento morto para não travar workers
         session.execute(
@@ -573,7 +573,7 @@ class NewsCluster:
                 source_article_id=article.id,
                 target_event_id=event.id,
                 distance_score=float(score),
-                status="pending",
+                status=JobStatus.PENDING,
                 reasoning=reason,
             )
             session.add(prop)

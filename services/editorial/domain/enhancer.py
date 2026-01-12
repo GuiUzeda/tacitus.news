@@ -44,7 +44,7 @@ class NewsEnhancerDomain:
         # We skip articles involved in active merge proposals to avoid race conditions
         article_proposals = select(1).where(
             MergeProposalModel.source_article_id == ArticleModel.id,
-            MergeProposalModel.status.in_(['pending', 'processing'])
+            MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
         )
 
         stmt = (

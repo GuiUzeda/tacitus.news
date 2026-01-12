@@ -101,6 +101,8 @@ class HarvestingDomain:
     USER_AGENTS = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
     ]
 
     def __init__(self, max_cpu_workers=3):
@@ -112,8 +114,10 @@ class HarvestingDomain:
             initializer=init_worker
         )
         self.base_headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://www.google.com/",
+            "Upgrade-Insecure-Requests": "1",
         }
         self.factory = HarvesterFactory()
 
@@ -132,7 +136,21 @@ class HarvestingDomain:
         try:
             name = newspaper_data["name"]
             # UPDATED: Pass the full feed objects (with patterns/flags)
-            feeds = newspaper_data["feeds"]
+            raw_feeds = newspaper_data["feeds"]
+            
+            # Validate Regex Patterns to prevent crashes in Harvester Base
+            feeds = []
+            for feed in raw_feeds:
+                pattern = feed.get("url_pattern")
+                if pattern:
+                    try:
+                        re.compile(pattern)
+                        feeds.append(feed)
+                    except re.error as e:
+                        logger.error(f"[{name}] Skipping Feed {feed.get('url')} due to Invalid Regex: {e}")
+                else:
+                    feeds.append(feed)
+
             harvester_instance = self.factory.get_harvester(name)
             # 1. Pipeline Execution
             articles_data = await self._run_pipeline(
@@ -246,7 +264,16 @@ class HarvestingDomain:
             return valid_models
         except IntegrityError:
             session.rollback()
-            return [] 
+            # Fallback: Save one by one to isolate duplicates
+            saved = []
+            for model in valid_models:
+                try:
+                    session.add(model)
+                    session.commit()
+                    saved.append(model)
+                except IntegrityError:
+                    session.rollback()
+            return saved
         except Exception as e:
             logger.error(f"Save Error: {e}")
             session.rollback()

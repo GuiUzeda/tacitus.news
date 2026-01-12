@@ -35,10 +35,9 @@ class NewsReviewerWorker(BaseQueueWorker):
             queue_model=MergeProposalModel,
             target_queue_name=None,
             batch_size=10,
-            pending_status=JobStatus.PENDING,
+            pending_status=JobStatus.PENDING,     # Ensure this is Enum
+            processing_status=JobStatus.PROCESSING # Ensure this is Enum
         )
-
-        self._reset_stuck_tasks()
 
     async def run(self):
         logger.info(f"🚀 Reviewer Worker started (Concurrency: {self.concurrency})")
@@ -55,6 +54,9 @@ class NewsReviewerWorker(BaseQueueWorker):
         # Producer Loop
         while True:
             try:
+                # Periodic cleanup
+                self._check_cleanup()
+
                 if self.internal_queue.full():
                     await asyncio.sleep(1.0)
                     continue
@@ -116,7 +118,7 @@ class NewsReviewerWorker(BaseQueueWorker):
         subq_art = (
             select(MergeProposalModel.source_article_id)
             .where(
-                MergeProposalModel.status == "pending",
+                MergeProposalModel.status == JobStatus.PENDING,
                 MergeProposalModel.source_article_id.is_not(None),
             )
             .distinct()
@@ -133,7 +135,7 @@ class NewsReviewerWorker(BaseQueueWorker):
         subq_evt = (
             select(MergeProposalModel.source_event_id)
             .where(
-                MergeProposalModel.status == "pending",
+                MergeProposalModel.status == JobStatus.PENDING,
                 MergeProposalModel.source_event_id.is_not(None),
             )
             .distinct()
@@ -152,25 +154,14 @@ class NewsReviewerWorker(BaseQueueWorker):
         stmt = (
             select(MergeProposalModel)
             .where(column.in_(ids))
-            .where(MergeProposalModel.status == "pending")
+            .where(MergeProposalModel.status == JobStatus.PENDING)
             .with_for_update(skip_locked=True)
         )
         proposals = session.execute(stmt).scalars().all()
         for p in proposals:
-            p.status = "processing"
+            p.status = JobStatus.PROCESSING
         session.commit()
         return proposals
-
-    def _reset_stuck_tasks(self):
-        with self.SessionLocal() as session:
-            res = session.execute(
-                update(MergeProposalModel)
-                .where(MergeProposalModel.status == "processing")
-                .values(status="pending")
-            )
-            session.commit()
-            if res.rowcount:
-                logger.info(f"🧹 Reset {res.rowcount} stuck proposals.")
 
 
 if __name__ == "__main__":

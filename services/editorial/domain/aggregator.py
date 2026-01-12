@@ -50,9 +50,11 @@ class EventAggregator:
         n = event.article_count
         
         # Initialization or Reset
-        if n <= 1 or not event.embedding_centroid:
+        if n <= 1 or event.embedding_centroid is None or len(event.embedding_centroid) == 0:
             event.embedding_centroid = new_vector
             return
+            
+        if n == 0: n = 1 # Safety guard against division by zero
 
         # Weighted Average Calculation
         # Since n includes the current article, the 'old' weight is n-1.

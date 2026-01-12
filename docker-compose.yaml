@@ -1,13 +1,11 @@
 services:
-  postgre:
+  postgres:
     build:
       context: .
       dockerfile: services/db/Dockerfile
     restart: always
-    environment:
-      - POSTGRES_USER=postgre
-      - POSTGRES_PASSWORD=postgre
-      - POSTGRES_DB=postgre
+    env_file:
+      - .env
     logging:
       options:
         max-size: 10m
@@ -20,23 +18,124 @@ services:
       - db_network
   backend:
     depends_on:
-      - postgre
+      - postgres
     image: editorial/backend
     build:
       context: .
       dockerfile: services/backend/Dockerfile
       network: host
-    environment:
-      - PG_DSN=postgresql://postgre:postgre@postgre:5432/postgre
-    entrypoint: ["uvicorn", "app.main:app" , "--host", "0.0.0.0", "--port", "8080" ,"--reload"]
-    volumes: 
+    env_file:
+      - .env
+    entrypoint:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+        "--reload",
+      ]
+    volumes:
       - ./services/backend/app:/code/app
     ports:
       - "8080:8080"
     networks:
       - db_network
+  worker-harvester:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/harvester.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-filter:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/filter.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-cluster:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/cluster.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-merger:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/merger.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-reviewer:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/reviewer.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-enhancer:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/enhancer.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-publisher:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/publisher.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+
 volumes:
   services:
-    external: true   
+    external: true
 networks:
   db_network: {}

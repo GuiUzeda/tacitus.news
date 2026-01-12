@@ -78,7 +78,7 @@ class NewsReviewerDomain:
             for prop_data in batch:
                 pid = str(prop_data['proposal_id'])
                 if pid not in results_map:
-                    self._update_proposal_status(session, pid, "failed", "LLM Missed Item")
+                    self._update_proposal_status(session, pid, JobStatus.FAILED, "LLM Missed Item")
                     continue
 
                 result = results_map[pid]
@@ -98,7 +98,7 @@ class NewsReviewerDomain:
                         break # Stop processing other candidates
                 else:
                     # REJECT
-                    self._update_proposal_status(session, pid, "rejected", f"Auto-Rejected: {result.reasoning}")
+                    self._update_proposal_status(session, pid, JobStatus.REJECTED, f"Auto-Rejected: {result.reasoning}")
 
         # 4. Fallback: Create New Event?
         # Only if it was an ARTICLE, no match was found, and we actually reviewed proposals.
@@ -204,7 +204,9 @@ class NewsReviewerDomain:
             reason_prefix = "Auto-Merged Article"
 
         # 3. Update Winning Proposal
-        self._update_proposal_status(session, proposal_id, "approved", f"{reason_prefix}: {reason}")
+        self._update_proposal_status(session, proposal_id, JobStatus.APPROVED, f"{reason_prefix}: {reason}")
+
+        logger.success(f"✅ {reason_prefix}: {source_id} -> {target_id} | Reason: {reason}")
 
         # 4. Reject Losers (Concurrent proposals for same source)
         col_id = MergeProposalModel.source_event_id if is_event_merge else MergeProposalModel.source_article_id
@@ -213,9 +215,9 @@ class NewsReviewerDomain:
             .where(
                 col_id == source_id,
                 MergeProposalModel.id != proposal_id,
-                MergeProposalModel.status.in_(["pending", "processing"])
+                MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
             )
-            .values(status="rejected", reasoning="Merged into another target.")
+            .values(status=JobStatus.REJECTED, reasoning="Merged into another target (Auto-Cleanup).")
         )
         session.commit()
         return True
@@ -242,7 +244,7 @@ class NewsReviewerDomain:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.id.in_(pids))
-            .values(status="rejected", reasoning=reason)
+            .values(status=JobStatus.REJECTED, reasoning=reason)
         )
         session.commit()
 

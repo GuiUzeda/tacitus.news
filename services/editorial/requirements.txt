@@ -1,0 +1,16 @@
+sqlalchemy
+psycopg2-binary
+pgvector
+pydantic
+pydantic-settings
+loguru
+aiohttp
+beautifulsoup4
+playwright
+trafilatura
+spacy
+google-genai
+tenacity
+sentence_transformers
+websockets
+einops

@@ -42,10 +42,13 @@ class EventStatus(str, enum.Enum):
 
 
 class JobStatus(enum.Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    WAITING = "WAITING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
 
 
 class BaseModel(DeclarativeBase):
@@ -315,8 +318,8 @@ class MergeProposalModel(BaseModel):
     distance_score: Mapped[float] = mapped_column(Float)
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    # Status: pending, approved, rejected, needs_human_review, executed, failed
-    status: Mapped[str] = mapped_column(String, default="pending") 
+    # Status: PENDING, APPROVED, REJECTED, FAILED, PROCESSING
+    status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
 
