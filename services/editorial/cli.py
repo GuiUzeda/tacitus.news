@@ -13,16 +13,28 @@ from rich.panel import Panel
 from rich.prompt import Prompt, IntPrompt, Confirm
 from rich.markdown import Markdown
 
+# --- REFACTORED IMPORTS ---
 from config import Settings
-from models import (
+
+# Core (Shared Models & Utils)
+from core.nlp_service import NLPService
+from core.models import (
     ArticlesQueueModel,
     EventsQueueModel, 
     JobStatus,
     EventsQueueName,
 )
-from news_events_lib.models import ArticleModel, NewsEventModel, MergeProposalModel, EventStatus
-from news_cluster import NewsCluster
-from nlp_service import NLPService
+
+# Domain Services (The "Brains")
+from domain.clustering import NewsCluster
+
+# Shared Lib
+from news_events_lib.models import (
+    ArticleModel, 
+    NewsEventModel, 
+    MergeProposalModel, 
+    EventStatus
+)
 
 console = Console()
 settings = Settings()
@@ -32,7 +44,9 @@ SessionLocal = sessionmaker(bind=engine)
 
 class EditorialCLI:
     def __init__(self):
+        # Use the Domain Service
         self.cluster_service = NewsCluster()
+        # Use the Core Service
         self.nlp_service = NLPService()
 
     def start(self):
@@ -78,6 +92,8 @@ class EditorialCLI:
                 console.print("Bye! 👋")
                 sys.exit(0)
 
+    # ... [Rest of the methods remain mostly the same, but use self.cluster_service which is now domain.NewsCluster] ...
+
     def review_merges(self):
         with SessionLocal() as session:
             stmt = (
@@ -107,7 +123,6 @@ class EditorialCLI:
             console.clear()
             console.rule("🕵️  Review Merges Dashboard")
             
-            # Summary Grid
             grid = Table.grid(expand=True, padding=(0, 2))
             grid.add_column(justify="center", ratio=1)
             grid.add_column(justify="center", ratio=1)
@@ -140,7 +155,6 @@ class EditorialCLI:
 
     def _review_article_merges(self, proposals):
         from itertools import groupby
-        # Sort by article ID for grouping
         proposals.sort(key=lambda x: str(x.source_article_id))
         grouped_props = {
             k: list(v)
@@ -229,7 +243,6 @@ class EditorialCLI:
 
     def _review_event_merges(self, proposals):
         from itertools import groupby
-        # Sort by source event id first for groupby
         proposals.sort(key=lambda x: str(x.source_event_id))
         
         grouped = {
@@ -250,7 +263,6 @@ class EditorialCLI:
             console.clear()
             console.rule(f"🔗 Event Merge Review {idx}/{total}", style="magenta")
 
-            # Source Event Display
             source_text = f"[bold]{source.title}[/bold]\n"
             source_text += f"[dim]ID: {source.id}[/dim]\n"
             source_text += f"📅 {source.created_at.strftime('%Y-%m-%d')} | 📰 {source.article_count} Articles"
@@ -260,7 +272,6 @@ class EditorialCLI:
             
             console.print(Panel(source_text, title="🔻 SOURCE EVENT (To be dissolved)", border_style="red"))
 
-            # Candidates Table
             table = Table(show_header=True, header_style="bold magenta", title="Target Candidates (Master)")
             table.add_column("#", style="dim", width=4)
             table.add_column("Target Event")
@@ -281,7 +292,6 @@ class EditorialCLI:
                 )
             console.print(table)
 
-            # Actions
             menu_text = (
                 f"[bold green]1-{len(props)}[/bold green] : Merge Source into Target #\n"
                 "[bold red]r[/bold red]   : Reject All (Keep Separate)\n"
@@ -312,11 +322,8 @@ class EditorialCLI:
                 self._execute_event_merge_cli(props[int(choice) - 1])
                 return "next"
 
-    # --- EXECUTION (DELEGATED TO CLUSTER SERVICE) ---
-
     def _execute_merge(self, proposal):
         with SessionLocal() as session:
-            # Re-fetch active objects
             article = session.get(ArticleModel, proposal.source_article_id)
             event = session.get(NewsEventModel, proposal.target_event_id)
             
@@ -324,6 +331,7 @@ class EditorialCLI:
                 console.print("[red]Object not found in DB[/red]")
                 return
 
+            # Call Domain Logic
             self.cluster_service.execute_merge_action(session, article, event)
             
             session.commit()
@@ -337,6 +345,7 @@ class EditorialCLI:
                 console.print("[red]Article not found[/red]")
                 return
 
+            # Call Domain Logic
             self.cluster_service.execute_new_event_action(session, article, reason="Manual CLI")
             
             session.commit()
@@ -345,7 +354,6 @@ class EditorialCLI:
 
     def _execute_event_merge_cli(self, proposal):
         with SessionLocal() as session:
-            # Re-fetch
             prop = session.get(MergeProposalModel, proposal.id)
             source = session.get(NewsEventModel, prop.source_event_id)
             target = session.get(NewsEventModel, prop.target_event_id)
@@ -354,9 +362,9 @@ class EditorialCLI:
                 console.print("[red]Objects missing.[/red]")
                 return
 
+            # Call Domain Logic
             self.cluster_service.execute_event_merge(session, source, target)
             
-            # Update proposal status manually since cluster service doesn't know about this specific proposal ID
             prop.status = "approved"
             prop.reasoning = "Manual CLI Approval"
             session.add(prop)
@@ -381,6 +389,7 @@ class EditorialCLI:
         console.rule("🔎 Manual Search & Link")
 
         with SessionLocal() as session:
+            target_date = None
             if not article:
                 query = Prompt.ask("Enter search query")
                 vector = self.nlp_service.calculate_vector(query)
@@ -390,8 +399,17 @@ class EditorialCLI:
                 console.print(f"Searching for: [cyan]{article_db.title}[/cyan]")
                 query = Prompt.ask("Refine Query", default=self.cluster_service.derive_search_query(article_db))
                 vector = article_db.embedding
+                # Use article date to scope search
+                target_date = article_db.published_date
 
-            results = self.cluster_service.search_news_events_hybrid(session, query, vector, limit=10)
+            # Updated call to match Domain Service signature (passing date if available)
+            results = self.cluster_service.search_news_events_hybrid(
+                session, 
+                query, 
+                vector, 
+                target_date=target_date if target_date else datetime.now(timezone.utc),
+                limit=10
+            )
             
             table = Table(title=f"Results for '{query}'")
             table.add_column("#"); table.add_column("Event"); table.add_column("Score")
@@ -408,7 +426,6 @@ class EditorialCLI:
                 if 0 <= idx < len(candidates):
                     target = candidates[idx]
                     
-                    # Re-fetch for safety
                     art_db = session.get(ArticleModel, article.id)
                     ev_db = session.get(NewsEventModel, target.id)
                     
@@ -441,7 +458,11 @@ class EditorialCLI:
 
             console.print(f"\n🔎 Searching duplicates for: [bold]{target_event.title}[/bold]...")
             results = self.cluster_service.search_news_events_hybrid(
-                session, target_event.search_text or target_event.title, target_event.embedding_centroid, limit=20
+                session, 
+                target_event.search_text or target_event.title, 
+                target_event.embedding_centroid, 
+                target_date=target_event.created_at,
+                limit=20
             )
             candidates = [r[0] for r in results if r[0].id != target_event.id]
             if not candidates:
@@ -472,7 +493,6 @@ class EditorialCLI:
             console.rule("🚑 Queue Manager")
 
             with SessionLocal() as session:
-                # Articles Stats
                 a_stats = (
                     session.query(
                         ArticlesQueueModel.queue_name,
@@ -483,7 +503,6 @@ class EditorialCLI:
                     .all()
                 )
 
-                # Events Stats
                 e_stats = (
                     session.query(
                         EventsQueueModel.queue_name,
@@ -516,7 +535,6 @@ class EditorialCLI:
                 table2.add_row(queue_str, f"[{color}]{status_str}[/{color}]", str(c))
             console.print(table2)
 
-            # Proposals Stats
             p_stats = (
                 session.query(
                     MergeProposalModel.status,
@@ -550,7 +568,6 @@ class EditorialCLI:
                 self._manage_proposals_queue()
             elif choice == "rt":
                 with SessionLocal() as session:
-                    # Retry both queues
                     res1 = session.execute(
                         update(ArticlesQueueModel)
                         .where(ArticlesQueueModel.status == JobStatus.FAILED)
@@ -598,7 +615,6 @@ class EditorialCLI:
             console.rule(f"🔧 Managing: {title}")
             
             with SessionLocal() as session:
-                # Stats
                 stats = (
                     session.query(
                         model_class.queue_name,
@@ -620,7 +636,6 @@ class EditorialCLI:
                     table.add_row(queue_str, f"[{color}]{status_str}[/{color}]", str(c))
                 console.print(table)
                 
-                # Show recent failures
                 failures = (
                     session.query(model_class)
                     .filter(model_class.status == JobStatus.FAILED)
@@ -781,11 +796,8 @@ class EditorialCLI:
             console.print(table)
             Prompt.ask("Press Enter to return")
 
-    # --- PUBLISHING REVIEW ---
-
     def publishing_review(self):
         with SessionLocal() as session:
-            # Fetch jobs from Publisher Queue
             stmt = (
                 select(EventsQueueModel)
                 .options(joinedload(EventsQueueModel.event).joinedload(NewsEventModel.articles))
@@ -813,21 +825,16 @@ class EditorialCLI:
             console.clear()
             console.rule(f"🚀 Publishing Review {idx}/{total}")
             
-            # Display Event
             console.print(f"[bold size=16]{event.title}[/bold size=16]")
             console.print(f"ID: {event.id} | Articles: {event.article_count}")
             
-            # Summary
             if event.summary and isinstance(event.summary, dict):
-                # Prefer center/neutral summary
                 summary_text = event.summary.get("center") or event.summary.get("bias") or str(event.summary)
                 console.print(Panel(Markdown(summary_text), title="Generated Briefing", border_style="blue"))
             
-            # Stance/Stats
             if event.stance_distribution:
                 console.print(f"[yellow]Stance Dist:[/yellow] {event.stance_distribution}")
             
-            # Menu
             console.print("\n[bold green]p[/bold green] : Publish (Live)")
             console.print("[bold red]a[/bold red] : Archive (Reject)")
             console.print("[bold yellow]e[/bold yellow] : Edit Title")
@@ -853,7 +860,7 @@ class EditorialCLI:
                     e = session.get(NewsEventModel, event.id)
                     e.title = new_title
                     session.commit()
-                    event.title = new_title # Update local object for display
+                    event.title = new_title 
 
     def _execute_publish_action(self, job_id, event_id, new_status):
         with SessionLocal() as session:
@@ -866,8 +873,6 @@ class EditorialCLI:
                 session.commit()
                 console.print(f"[green]✅ Set to {new_status.value}![/green]")
                 time.sleep(1)
-
-    # --- TOOLS ---
 
     def inspect_tool(self):
         event_id_str = Prompt.ask("Enter Event UUID (or partial title search)")
@@ -954,10 +959,6 @@ class EditorialCLI:
                     self._read_article_content(sorted_articles[int(choice) - 1])
 
     def _read_article_content(self, article):
-        """
-        Safely reads article content by opening a new session and re-fetching.
-        This handles both detached and attached objects.
-        """
         console.clear()
         console.rule(f"Reading: {article.title}")
         
@@ -969,15 +970,12 @@ class EditorialCLI:
         )
         print() 
 
-        # FIX: Fetch fresh content using a dedicated session
         content_text = "No content found."
         with SessionLocal() as session:
-            # Re-fetch article to load lazy relationships
             fresh_article = session.get(ArticleModel, article.id)
             if fresh_article and fresh_article.contents:
                 content_text = fresh_article.contents[0].content
             
-            # Print logic inside the session to ensure access
             if fresh_article and fresh_article.summary:
                 console.print(Panel(fresh_article.summary, title="Summary"))
             

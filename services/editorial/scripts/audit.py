@@ -2,7 +2,7 @@ import sys
 import os
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
-from config import Settings
+from ..config import Settings
 from news_events_lib.models import NewsEventModel, ArticleModel
 
 # Setup DB Connection

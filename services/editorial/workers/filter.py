@@ -1,22 +1,22 @@
-import asyncio
 import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+import asyncio
 from datetime import datetime, timezone
-from typing import List
-
-from base_worker import BaseQueueWorker
-
 from loguru import logger
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from news_events_lib.models import (
-    ArticleModel,
-    JobStatus,
-)
-from models import ArticlesQueueModel, ArticlesQueueName
+# Models
+from news_events_lib.models import ArticleModel, JobStatus
+from core.models import ArticlesQueueModel, ArticlesQueueName
 from config import Settings
-from llm_parser import CloudNewsFilter
+from core.base_worker import BaseQueueWorker
+
+# IMPORT DOMAIN LOGIC
+from domain.filtering import NewsFilterDomain
 
 class NewsFilterWorker(BaseQueueWorker):
     def __init__(self):
@@ -25,13 +25,15 @@ class NewsFilterWorker(BaseQueueWorker):
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
-        self.news_filter = CloudNewsFilter()
+        
+        # Instantiate Domain Logic
+        self.domain = NewsFilterDomain()
         
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=ArticlesQueueModel,
             target_queue_name=ArticlesQueueName.FILTER,
-            batch_size=50,
+            batch_size=50, # Keep batch size aligned with LLM context limits
             pending_status=JobStatus.PENDING
         )
 
@@ -43,12 +45,15 @@ class NewsFilterWorker(BaseQueueWorker):
                 if count == 0:
                     logger.info(f"Queue {self.queue_name} empty. Sleeping 60s...")
                     await asyncio.sleep(60)
+                else:
+                    # Brief pause between batches to be nice to the API
+                    await asyncio.sleep(1)
             except Exception as e:
                 logger.critical(f"Worker crashed: {e}")
                 await asyncio.sleep(30)
 
     def _fetch_jobs(self, session):
-        # Override to join with ArticleModel
+        # Override to join with ArticleModel efficiently
         stmt = (
             select(ArticlesQueueModel, ArticleModel)
             .join(ArticleModel, ArticlesQueueModel.article_id == ArticleModel.id)
@@ -64,7 +69,7 @@ class NewsFilterWorker(BaseQueueWorker):
         for queue_item, article in rows:
             queue_item.status = JobStatus.PROCESSING
             queue_item.updated_at = datetime.now(timezone.utc)
-            # Attach article to queue_item temporarily for processing
+            # Attach article to queue_item for the domain logic to use
             queue_item.article = article 
             jobs.append(queue_item)
             
@@ -72,49 +77,20 @@ class NewsFilterWorker(BaseQueueWorker):
         return jobs
 
     async def process_items(self, session, jobs):
+        """
+        Delegates the batch processing to the Domain Layer.
+        """
         if not jobs: return
 
-        # Extract titles
-        titles = [job.article.title for job in jobs]
-        
-        approved_indices = []
-        failed_batch = False
-        
         try:
-            logger.info(f"Filtering batch of {len(titles)} articles...")
-            # Retries are now handled by the decorator in llm_parser
-            approved_indices = await self.news_filter.filter_batch(titles)
-            await asyncio.sleep(1) # Brief pause between batches
+            approved, rejected = await self.domain.execute_batch_filtering(session, jobs)
+            logger.success(f"✅ Batch Processed: {approved} Approved | ❌ {rejected} Rejected")
         except Exception as e:
-            logger.error(f"Batch failed after retries: {e}")
-            failed_batch = True
-
-        # Process Results
-        if failed_batch:
+            logger.error(f"Critical error in batch processing: {e}")
+            # Fallback: Mark all as failed if domain logic crashes unhandled
             for job in jobs:
                 job.status = JobStatus.FAILED
-                job.msg = "AI Processing Error (Max Retries)"
-                job.updated_at = datetime.now(timezone.utc)
-            logger.error(f"⚠️ Marked {len(jobs)} articles as FAILED due to AI error.")
-        else:
-            approved_count = 0
-            rejected_count = 0
-            
-            for idx, job in enumerate(jobs):
-                if idx in approved_indices:
-                    # Approved -> Move to Cluster Queue
-                    job.status = JobStatus.PENDING
-                    job.queue_name = ArticlesQueueName.CLUSTER
-                    job.updated_at = datetime.now(timezone.utc)
-                    approved_count += 1
-                else:
-                    # Rejected -> Completed
-                    job.status = JobStatus.COMPLETED
-                    job.msg = "Rejected by AI Filter"
-                    job.updated_at = datetime.now(timezone.utc)
-                    rejected_count += 1
-            
-            logger.success(f"✅ Approved {approved_count} | ❌ Rejected {rejected_count}")
+                job.msg = f"Worker Critical: {str(e)}"
 
 if __name__ == "__main__":
     worker = NewsFilterWorker()

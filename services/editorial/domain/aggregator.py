@@ -1,13 +1,74 @@
 import numpy as np
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from news_events_lib.models import NewsEventModel, ArticleModel
 
 class EventAggregator:
     """
     Centralizes the logic for updating NewsEvent statistics 
-    (Centroids, Interests, Bias, Stance) to ensure consistency 
+    (Centroids, Interests, Bias, Stance, Ranks) to ensure consistency 
     between the Clusterer and the Enhancer.
     """
+
+    @staticmethod
+    def aggregate_basic_stats(event: NewsEventModel, article: ArticleModel):
+        """
+        Updates basic event stats: Article Count, Date Range, and Editorial Rank.
+        Call this whenever an article is linked/merged into an event (Clusterer).
+        """
+        # 1. Update Counts
+        event.article_count += 1
+        
+        # 2. Update Date Range
+        if article.published_date:
+            if not event.first_article_date or article.published_date < event.first_article_date:
+                event.first_article_date = article.published_date
+            
+            if not event.last_article_date or article.published_date > event.last_article_date:
+                event.last_article_date = article.published_date
+
+        # 3. Update Editorial Rank & Score (The New Logic)
+        if article.source_rank:
+            # Update Best Rank (Lower is better, e.g., 1 is top)
+            if event.best_source_rank is None or article.source_rank < event.best_source_rank:
+                event.best_source_rank = article.source_rank
+
+            # Calculate Editorial Weight
+            # Formula: 10 / Rank. (Rank 1 = 10 pts, Rank 10 = 1 pt)
+            weight = 10.0 / float(article.source_rank)
+            
+            # Add to cumulative score
+            event.editorial_score = (event.editorial_score or 0.0) + weight
+
+    @staticmethod
+    def recalculate_event(event: NewsEventModel, articles: List[ArticleModel]):
+        """
+        Full recalculation of an event's stats from a list of articles.
+        Useful after a merge operation where you combine two events.
+        """
+        if not articles: return
+
+        event.article_count = len(articles)
+        
+        # Recalculate Dates
+        dates = [a.published_date for a in articles if a.published_date]
+        if dates:
+            event.first_article_date = min(dates)
+            event.last_article_date = max(dates)
+
+        # Recalculate Rank Scores
+        best_rank = None
+        total_score = 0.0
+        
+        for art in articles:
+            if art.source_rank:
+                if best_rank is None or art.source_rank < best_rank:
+                    best_rank = art.source_rank
+                total_score += (10.0 / float(art.source_rank))
+
+        event.best_source_rank = best_rank
+        event.editorial_score = total_score
+        event.updated_at = datetime.now(timezone.utc)
 
     @staticmethod
     def update_centroid(event: NewsEventModel, new_vector: List[float]):
@@ -15,7 +76,6 @@ class EventAggregator:
         if new_vector is None or len(new_vector) == 0: return
         
         n = event.article_count
-        # If it's a new event (0 articles), the centroid is just the vector
         if n == 0:
             event.embedding_centroid = new_vector
             return
@@ -23,7 +83,7 @@ class EventAggregator:
         current_centroid = np.array(event.embedding_centroid)
         vec = np.array(new_vector)
         
-        # Weighted average: (Old * N + New) / (N + 1)
+        # Weighted average
         updated = ((current_centroid * n) + vec) / (n + 1)
         event.embedding_centroid = updated.tolist()
 
@@ -32,7 +92,6 @@ class EventAggregator:
         """Aggregates entity interests into the event."""
         if not interests: return
 
-        # Copy to ensure SQLAlchemy detects mutation
         current = dict(event.interest_counts or {})
         
         for category, items in interests.items():
@@ -48,7 +107,7 @@ class EventAggregator:
         """Aggregates Newspaper Bias (Source tracking) and Ownership stats."""
         if not article.newspaper: return
 
-        # 1. Bias Distribution (Tracking Sources)
+        # 1. Bias Distribution
         if article.newspaper.bias:
             bias = article.newspaper.bias
             bias_dist = dict(event.bias_distribution or {})
@@ -82,26 +141,18 @@ class EventAggregator:
 
     @staticmethod
     def aggregate_clickbait(event: NewsEventModel, bias: str, score: float):
-        """
-        Aggregates the clickbait score into a running average per bias.
-        Uses stance_distribution counts to determine N (enhanced articles).
-        """
+        """Aggregates the clickbait score into a running average per bias."""
         if not bias or score is None: return
 
-        # 1. Get N from Stance Distribution (which tracks enhanced articles)
-        # We assume aggregate_stance has run first, so the count includes the current article.
         stance_dist = event.stance_distribution or {}
         bias_stats = stance_dist.get(bias, {})
         n = sum(bias_stats.values())
         
-        if n == 0: n = 1 # Safety fallback
+        if n == 0: n = 1
         
-        # 2. Update Weighted Average
         cb_dist = dict(event.clickbait_distribution or {})
         current_avg = cb_dist.get(bias, 0.0)
 
-        # Formula: ((OldAvg * (N-1)) + NewScore) / N
-        # If N=1, this simplifies to NewScore / 1
         new_avg = score if n <= 1 else ((current_avg * (n - 1)) + score) / n
         
         cb_dist[bias] = new_avg

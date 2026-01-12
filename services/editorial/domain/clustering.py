@@ -1,33 +1,30 @@
-import asyncio
 import uuid
-import sys
-import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
+from dataclasses import dataclass
+
 from loguru import logger
 from sqlalchemy import select, func, and_, desc, update, or_
 from sqlalchemy.orm import Session, aliased, sessionmaker, joinedload
 from sqlalchemy import create_engine
-from dataclasses import dataclass
 
-# Models
+# Shared Libraries
 from news_events_lib.models import (
     NewsEventModel,
     ArticleModel,
     MergeProposalModel,
     JobStatus,
 )
-from models import (
+
+# Service Modules (Adjust imports if you moved these to core/)
+from core.models import (
     ArticlesQueueModel,
-    ArticlesQueueName,
     EventsQueueModel,
     EventsQueueName,
 )
 from config import Settings
+from domain.aggregator import EventAggregator
 
-
-from base_worker import BaseQueueWorker
-from event_aggregator import EventAggregator
 
 @dataclass
 class ClusterResult:
@@ -41,6 +38,8 @@ class NewsCluster:
     def __init__(self):
         self.settings = Settings()
         self.engine = create_engine(str(self.settings.pg_dsn))
+        # We keep the engine here for the logic that needs to create its own sessions
+        # (e.g. searching vectors independent of the worker's transaction)
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
@@ -48,22 +47,20 @@ class NewsCluster:
         self.SIMILARITY_STRICT = self.settings.similarity_strict
         self.SIMILARITY_LOOSE = self.settings.similarity_loose
 
-    # --- STANDARD ACTIONS (Used by CLI & Worker) ---
+    # --- STANDARD ACTIONS ---
 
     def execute_merge_action(
         self, session: Session, article: ArticleModel, event: NewsEventModel
     ):
         """
         Standardizes the 'Merge' operation:
-        1. Links article to event (updating centroid).
-        2. Rejects conflicting proposals for this article.
+        1. Links article to event.
+        2. Rejects conflicting proposals.
         3. Updates ArticlesQueue -> COMPLETED.
-        4. triggers EventsQueue -> ENHANCER.
+        4. Triggers EventsQueue -> ENHANCER.
         """
-        # 1. Link
         self._link_to_event(session, event, article, article.embedding)
 
-        # 2. Reject other proposals for this article
         session.execute(
             update(MergeProposalModel)
             .where(
@@ -73,7 +70,6 @@ class NewsCluster:
             )
             .values(status="rejected")
         )
-        # Approve the specific proposal if it exists
         session.execute(
             update(MergeProposalModel)
             .where(
@@ -83,39 +79,25 @@ class NewsCluster:
             .values(status="approved")
         )
 
-        # 3. Update Article Queue
         self._mark_article_queue_completed(session, article.id)
-
-        # 4. Trigger Event Enhancement
         self._trigger_event_enhancement(session, event.id)
-
         return event.id
 
     def execute_new_event_action(
         self, session: Session, article: ArticleModel, reason: str = ""
     ):
-        """
-        Standardizes the 'New Event' operation.
-        """
-        # 1. Create Event
-        # (Note: _create_new_event internally commits to reserve ID, so we re-fetch if needed)
         new_event_id = self._create_new_event(
             session, article, article.embedding, reason
         )
 
-        # 2. Reject ALL proposals for this article (since we made a new event)
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.source_article_id == article.id)
             .values(status="rejected")
         )
 
-        # 3. Update Article Queue
         self._mark_article_queue_completed(session, article.id)
-
-        # 4. Trigger Event Enhancement
         self._trigger_event_enhancement(session, new_event_id)
-
         return new_event_id
 
     def execute_event_merge(
@@ -124,14 +106,6 @@ class NewsCluster:
         source_event: NewsEventModel,
         target_event: NewsEventModel,
     ):
-        """
-        Merges two events (Source -> Target).
-        1. Moves all articles.
-        2. Updates target centroid (simple average or re-calc).
-        3. Deactivates source event.
-        4. Triggers enhancer for target.
-        """
-        # Move articles
         articles = session.scalars(
             select(ArticleModel)
             .options(joinedload(ArticleModel.newspaper))
@@ -139,28 +113,22 @@ class NewsCluster:
         ).all()
 
         for art in articles:
-            # We treat this like a new link to update centroids/search text
-            # Note: This might be heavy if merging massive events, but accurate.
             self._link_to_event(session, target_event, art, art.embedding)
 
-        # Deactivate Source
         source_event.is_active = False
-        source_event.title = f"{source_event.title}"
         source_event.merged_into_id = target_event.id
         source_event.last_updated_at = datetime.now(timezone.utc)
         session.add(source_event)
 
-        # Reject proposals pointing to the dead event
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
             .values(status="rejected")
         )
 
-        # Trigger Enhancement
         self._trigger_event_enhancement(session, target_event.id)
 
-    # --- HELPERS ---
+    # --- HELPERS & LOGIC ---
 
     def _mark_article_queue_completed(self, session: Session, article_id: uuid.UUID):
         session.execute(
@@ -170,25 +138,22 @@ class NewsCluster:
         )
 
     def _trigger_event_enhancement(self, session: Session, event_id: uuid.UUID):
-        # 1. Check local session cache for pending inserts (to avoid duplicates in same batch)
         for obj in session.new:
             if isinstance(obj, EventsQueueModel) and obj.event_id == event_id:
                 return
 
-        # 2. Check Database (Any status)
         existing = session.scalar(
-            select(EventsQueueModel).where(
-                EventsQueueModel.event_id == event_id
-            )
+            select(EventsQueueModel).where(EventsQueueModel.event_id == event_id)
         )
 
         if existing:
-            # If it exists, ensure it is PENDING in the ENHANCER queue
-            if existing.queue_name != EventsQueueName.ENHANCER or existing.status != JobStatus.PENDING:
+            if (
+                existing.queue_name != EventsQueueName.ENHANCER
+                or existing.status != JobStatus.PENDING
+            ):
                 existing.status = JobStatus.PENDING
                 existing.queue_name = EventsQueueName.ENHANCER
                 existing.updated_at = datetime.now(timezone.utc)
-                existing.msg = ""
                 session.add(existing)
         else:
             new_job = EventsQueueModel(
@@ -199,8 +164,6 @@ class NewsCluster:
                 updated_at=datetime.now(timezone.utc),
             )
             session.add(new_job)
-
-    # --- CORE SEARCH & LOGIC (Existing) ---
 
     def search_news_events_hybrid(
         self,
@@ -310,8 +273,6 @@ class NewsCluster:
         parts = [article.title]
         if article.entities:
             parts.extend(article.entities[:5])
-        if article.main_topics and len(parts) < 5:
-            parts.extend(article.main_topics[:2])
         return " ".join(parts)
 
     def cluster_existing_article(
@@ -328,8 +289,6 @@ class NewsCluster:
         )
 
         if not candidates:
-            # We still call internal create because we are in the middle of logic flow,
-            # but the RUN loop will call execute_new_event_action to finalize queues.
             new_id = self._create_new_event(
                 session, article, vector, reason="No Candidates Found"
             )
@@ -338,16 +297,14 @@ class NewsCluster:
         best_ev, rrf_score, vec_dist = candidates[0]
 
         if vec_dist > self.SIMILARITY_LOOSE:
-            if rrf_score > 0.05:  # Arbitrary threshold implying strong keyword rank
+            if rrf_score > 0.05:
                 return ClusterResult(
                     "PROPOSE",
                     best_ev.id,
                     [{"title": best_ev.title, "score": vec_dist}],
                     f"Yellow Zone ({vec_dist:.3f})",
                 )
-            reason = (
-                f"Vector Dist {vec_dist:.2f} too high (Buzzword Trap) {best_ev.title}"
-            )
+            reason = f"Vector Dist {vec_dist:.2f} too high"
             new_id = self._create_new_event(session, article, vector, reason=reason)
             return ClusterResult("NEW", new_id, [], reason)
 
@@ -370,7 +327,6 @@ class NewsCluster:
                             session, article, ev, dist, ambiguous=True
                         )
                         options.append({"title": ev.title, "score": dist})
-
                 return ClusterResult("PROPOSE_MULTI", None, options, "Ambiguous Match")
 
         self._link_to_event(session, best_ev, article, vector)
@@ -385,18 +341,22 @@ class NewsCluster:
     ):
         if event is None or article is None or vector is None:
             return None
-        
+
         # Lock explicitly to avoid "FOR UPDATE on outer join" error if event was loaded with joinedload
-        session.execute(select(NewsEventModel.id).where(NewsEventModel.id == event.id).with_for_update())
+        session.execute(
+            select(NewsEventModel.id)
+            .where(NewsEventModel.id == event.id)
+            .with_for_update()
+        )
         session.refresh(event)
 
         # 1. Update Centroid
         EventAggregator.update_centroid(event, vector)
-        
+
         # 2. Update Basic Stats
         event.article_count += 1
         event.last_updated_at = datetime.now(timezone.utc)
-        
+
         if event.search_text:
             event.search_text += f" {article.title}"
 
@@ -499,90 +459,3 @@ class NewsCluster:
             logger.info(
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
-
-class NewsClusterWorker(BaseQueueWorker):
-    def __init__(self):
-        self.settings = Settings()
-        self.engine = create_engine(str(self.settings.pg_dsn))
-        self.SessionLocal = sessionmaker(
-            autocommit=False, autoflush=False, bind=self.engine, expire_on_commit=False
-        )
-        self.cluster = NewsCluster()
-        
-        super().__init__(
-            session_maker=self.SessionLocal,
-            queue_model=ArticlesQueueModel,
-            target_queue_name=ArticlesQueueName.CLUSTER,
-            batch_size=100,
-            pending_status=JobStatus.PENDING
-        )
-
-    async def run(self):
-        logger.info(f"🚀 Worker started for queue: {self.queue_name}")
-        while True:
-            try:
-                count = await self.process_batch()
-                if count == 0:
-                    logger.info(f"Queue {self.queue_name} empty. Sleeping 60s...")
-                    await asyncio.sleep(60)
-            except Exception as e:
-                logger.critical(f"Worker crashed: {e}")
-                await asyncio.sleep(30)
-
-    def _fetch_jobs(self, session):
-        # Override to join with ArticleModel
-        stmt = (
-            select(ArticlesQueueModel, ArticleModel)
-            .join(ArticleModel, ArticlesQueueModel.article_id == ArticleModel.id)
-            .options(joinedload(ArticleModel.newspaper, innerjoin=True))
-            .where(ArticlesQueueModel.status == self.pending_status)
-            .where(ArticlesQueueModel.queue_name == self.queue_name)
-            .order_by(ArticleModel.published_date.asc())
-            .limit(self.batch_size)
-            .with_for_update(skip_locked=True)
-        )
-        rows = session.execute(stmt).all()
-        
-        jobs = []
-        for queue_item, article in rows:
-            queue_item.status = JobStatus.PROCESSING
-            queue_item.updated_at = datetime.now(timezone.utc)
-            queue_item.article = article 
-            jobs.append(queue_item)
-            
-        session.commit()
-        return jobs
-
-    async def process_item(self, session, job):
-        try:
-            article = job.article
-            
-            decision: ClusterResult = self.cluster.cluster_existing_article(
-                session, article
-            )
-
-            if decision.action in ["MERGE", "NEW"]:
-                # The event creation/linking happened inside cluster_existing_article
-                # We just need to trigger enhancement and mark queue completed.
-                if decision.event_id:
-                    self.cluster._trigger_event_enhancement(session, decision.event_id)
-                
-                job.status = JobStatus.COMPLETED
-                logger.success(f"Action {decision.action}: {article.title[:20]} -> ENHANCE")
-
-            elif decision.action in ["PROPOSE", "PROPOSE_MULTI"]:
-                job.status = JobStatus.COMPLETED
-                job.msg = f"Parked: {decision.reason}"
-                logger.warning(f"Action {decision.action}: {article.title} -> PARKED")
-
-            else:
-                job.status = JobStatus.FAILED
-                job.msg = f"Unknown Action: {decision.action}"
-        except Exception as e:
-            logger.error(f"Error processing article {job.article_id}: {e}")
-            session.rollback()
-            raise e
-
-if __name__ == "__main__":
-    worker = NewsClusterWorker()
-    asyncio.run(worker.run())
