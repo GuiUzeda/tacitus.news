@@ -16,7 +16,7 @@ from news_events_lib.models import (
     JobStatus,
 )
 
-# Service Modules (Adjust imports if you moved these to core/)
+# Service Modules
 from core.models import (
     ArticlesQueueModel,
     EventsQueueModel,
@@ -38,8 +38,6 @@ class NewsCluster:
     def __init__(self):
         self.settings = Settings()
         self.engine = create_engine(str(self.settings.pg_dsn))
-        # We keep the engine here for the logic that needs to create its own sessions
-        # (e.g. searching vectors independent of the worker's transaction)
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
@@ -113,8 +111,10 @@ class NewsCluster:
         ).all()
 
         for art in articles:
+            # We re-link every article to the target
             self._link_to_event(session, target_event, art, art.embedding)
 
+        # Soft Delete Source
         source_event.is_active = False
         source_event.merged_into_id = target_event.id
         source_event.last_updated_at = datetime.now(timezone.utc)
@@ -342,7 +342,7 @@ class NewsCluster:
         if event is None or article is None or vector is None:
             return None
 
-        # Lock explicitly to avoid "FOR UPDATE on outer join" error if event was loaded with joinedload
+        # Lock explicitly
         session.execute(
             select(NewsEventModel.id)
             .where(NewsEventModel.id == event.id)
@@ -350,33 +350,35 @@ class NewsCluster:
         )
         session.refresh(event)
 
-        # 1. Update Centroid
+        # --- AGGREGATION PIPELINE (Updated) ---
+        
+        # 1. Basic Stats (Counts + Dates + Rank Score)
+        # This handles article_count+=1 and the hot_score logic
+        EventAggregator.aggregate_basic_stats(event, article)
+        
+        # 2. Centroids
         EventAggregator.update_centroid(event, vector)
 
-        # 2. Update Basic Stats
-        event.article_count += 1
-        event.last_updated_at = datetime.now(timezone.utc)
-
-        if event.search_text:
-            event.search_text += f" {article.title}"
-
-        # 3. Aggregate Interests
+        # 3. Interests & Metadata
         EventAggregator.aggregate_interests(event, article.interests)
-
-        # 4. Aggregate Newspaper Metadata (Bias/Ownership)
         EventAggregator.aggregate_metadata(event, article)
 
-        # Explicitly update article_counts_by_bias
+        # 4. Local Search Optimization (Keep search_text updated)
+        if event.search_text:
+            event.search_text += f" {article.title}"
+        event.last_updated_at = datetime.now(timezone.utc)
+
+        # 5. Helper for Bias Distribution (Specific to Clustering logic)
         if article.newspaper and article.newspaper.bias:
             bias = article.newspaper.bias
-            # Clone dict to ensure SQLAlchemy detects change on JSONB
             counts = dict(event.article_counts_by_bias or {})
             counts[bias] = counts.get(bias, 0) + 1
             event.article_counts_by_bias = counts
 
-        # 5. Link
+        # 6. Link in DB
         article.event_id = event.id
         event.articles.append(article)
+        
         session.add(event)
         session.add(article)
         return event.id
@@ -388,14 +390,12 @@ class NewsCluster:
         init_counts = {}
         init_ownership = {}
 
-        # Interests
         if article.interests:
             for category, items in article.interests.items():
                 init_interests[category] = {}
                 for item in items:
                     init_interests[category][item] = 1
 
-        # Newspaper Metadata
         if article.newspaper:
             if article.newspaper.bias:
                 init_bias[article.newspaper.bias] = [str(article.newspaper.id)]
@@ -404,7 +404,14 @@ class NewsCluster:
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
 
-        # 2. Create Event
+        # 2. Create Event (With initial Score values)
+        # Rank Logic: If the first article has a rank, use it.
+        init_score = 0.0
+        init_rank = None
+        if article.source_rank:
+            init_rank = article.source_rank
+            init_score = 10.0 / float(article.source_rank)
+
         new_event = NewsEventModel(
             id=uuid.uuid4(),
             title=article.title,
@@ -414,14 +421,23 @@ class NewsCluster:
             created_at=article.published_date,
             last_updated_at=datetime.now(timezone.utc),
             search_text=f"{article.title} {self.derive_search_query(article)}",
-            # New Aggregated Fields
+            
+            # Aggregations
             interest_counts=init_interests,
             article_counts_by_bias=init_counts,
             bias_distribution=init_bias,
             ownership_stats=init_ownership,
+            
+            # Rank & Score
+            best_source_rank=init_rank,
+            editorial_score=init_score,
+            
+            # Date Range
+            first_article_date=article.published_date,
+            last_article_date=article.published_date
         )
         session.add(new_event)
-        session.flush()  # Generate ID without breaking transaction
+        session.flush()
 
         # 3. Link Article
         article = session.merge(article)

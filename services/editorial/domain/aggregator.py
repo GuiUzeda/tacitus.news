@@ -6,15 +6,14 @@ from news_events_lib.models import NewsEventModel, ArticleModel
 class EventAggregator:
     """
     Centralizes the logic for updating NewsEvent statistics 
-    (Centroids, Interests, Bias, Stance, Ranks) to ensure consistency 
-    between the Clusterer and the Enhancer.
+    (Centroids, Interests, Bias, Stance, Ranks) to ensure consistency.
     """
 
     @staticmethod
     def aggregate_basic_stats(event: NewsEventModel, article: ArticleModel):
         """
         Updates basic event stats: Article Count, Date Range, and Editorial Rank.
-        Call this whenever an article is linked/merged into an event (Clusterer).
+        Call this FIRST when linking an article.
         """
         # 1. Update Counts
         event.article_count += 1
@@ -27,7 +26,7 @@ class EventAggregator:
             if not event.last_article_date or article.published_date > event.last_article_date:
                 event.last_article_date = article.published_date
 
-        # 3. Update Editorial Rank & Score (The New Logic)
+        # 3. Update Editorial Rank & Score (Hot Score Logic)
         if article.source_rank:
             # Update Best Rank (Lower is better, e.g., 1 is top)
             if event.best_source_rank is None or article.source_rank < event.best_source_rank:
@@ -41,50 +40,26 @@ class EventAggregator:
             event.editorial_score = (event.editorial_score or 0.0) + weight
 
     @staticmethod
-    def recalculate_event(event: NewsEventModel, articles: List[ArticleModel]):
-        """
-        Full recalculation of an event's stats from a list of articles.
-        Useful after a merge operation where you combine two events.
-        """
-        if not articles: return
-
-        event.article_count = len(articles)
-        
-        # Recalculate Dates
-        dates = [a.published_date for a in articles if a.published_date]
-        if dates:
-            event.first_article_date = min(dates)
-            event.last_article_date = max(dates)
-
-        # Recalculate Rank Scores
-        best_rank = None
-        total_score = 0.0
-        
-        for art in articles:
-            if art.source_rank:
-                if best_rank is None or art.source_rank < best_rank:
-                    best_rank = art.source_rank
-                total_score += (10.0 / float(art.source_rank))
-
-        event.best_source_rank = best_rank
-        event.editorial_score = total_score
-        event.updated_at = datetime.now(timezone.utc)
-
-    @staticmethod
     def update_centroid(event: NewsEventModel, new_vector: List[float]):
-        """Updates the event centroid using weighted average."""
+        """
+        Updates the event centroid using weighted average.
+        Assumes aggregate_basic_stats has already incremented article_count.
+        """
         if new_vector is None or len(new_vector) == 0: return
         
         n = event.article_count
-        if n == 0:
+        
+        # Initialization or Reset
+        if n <= 1 or not event.embedding_centroid:
             event.embedding_centroid = new_vector
             return
 
+        # Weighted Average Calculation
+        # Since n includes the current article, the 'old' weight is n-1.
         current_centroid = np.array(event.embedding_centroid)
         vec = np.array(new_vector)
         
-        # Weighted average
-        updated = ((current_centroid * n) + vec) / (n + 1)
+        updated = ((current_centroid * (n - 1)) + vec) / n
         event.embedding_centroid = updated.tolist()
 
     @staticmethod
@@ -92,6 +67,7 @@ class EventAggregator:
         """Aggregates entity interests into the event."""
         if not interests: return
 
+        # Copy dict to ensure SQLAlchemy tracks the change
         current = dict(event.interest_counts or {})
         
         for category, items in interests.items():
@@ -127,7 +103,7 @@ class EventAggregator:
 
     @staticmethod
     def aggregate_stance(event: NewsEventModel, bias: str, stance_score: float):
-        """Aggregates Stance Distribution."""
+        """Aggregates Stance Distribution (Called by Enhancer)."""
         if not bias or stance_score is None: return
 
         bucket = "neutral"
@@ -141,9 +117,13 @@ class EventAggregator:
 
     @staticmethod
     def aggregate_clickbait(event: NewsEventModel, bias: str, score: float):
-        """Aggregates the clickbait score into a running average per bias."""
+        """
+        Aggregates the clickbait score into a running average per bias.
+        Uses stance_distribution to determine the 'N' (number of enhanced articles).
+        """
         if not bias or score is None: return
 
+        # Get N from Stance Distribution (tracks enhanced articles)
         stance_dist = event.stance_distribution or {}
         bias_stats = stance_dist.get(bias, {})
         n = sum(bias_stats.values())
@@ -153,7 +133,40 @@ class EventAggregator:
         cb_dist = dict(event.clickbait_distribution or {})
         current_avg = cb_dist.get(bias, 0.0)
 
+        # Running Average Update
         new_avg = score if n <= 1 else ((current_avg * (n - 1)) + score) / n
         
         cb_dist[bias] = new_avg
         event.clickbait_distribution = cb_dist
+    
+    @staticmethod
+    def recalculate_event(event: NewsEventModel, articles: List[ArticleModel]):
+        """
+        Full recalculation of an event's stats from a list of articles.
+        Useful for Merge operations or Database Audits.
+        """
+        if not articles: return
+
+        event.article_count = len(articles)
+        
+        # 1. Dates
+        dates = [a.published_date for a in articles if a.published_date]
+        if dates:
+            event.first_article_date = min(dates)
+            event.last_article_date = max(dates)
+        
+        # 2. Rank & Score
+        best_rank = None
+        total_score = 0.0
+        
+        for art in articles:
+            if art.source_rank:
+                if best_rank is None or art.source_rank < best_rank:
+                    best_rank = art.source_rank
+                total_score += (10.0 / float(art.source_rank))
+        
+        event.best_source_rank = best_rank
+        event.editorial_score = total_score
+        
+        # FIX: Use 'last_updated_at' instead of 'updated_at'
+        event.last_updated_at = datetime.now(timezone.utc)
