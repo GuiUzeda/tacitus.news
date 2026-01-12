@@ -8,54 +8,18 @@ from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Any
 from itertools import groupby
 
-from sqlalchemy import create_engine, select, update, and_
+from sqlalchemy import create_engine, desc, select, update, and_
 from sqlalchemy.orm import sessionmaker, joinedload
 from loguru import logger
 
 
 from base_worker import BaseQueueWorker
 from config import Settings
-from news_events_lib.models import MergeProposalModel, ArticleModel, NewsEventModel, JobStatus
-from llm_parser import CloudNewsAnalyzer, EventMatchSchema
+from news_events_lib.models import MergeProposalModel, ArticleModel, NewsEventModel, JobStatus, ArticleContentModel
+from llm_parser import CloudNewsAnalyzer, EventMatchSchema, BatchMatchResult
 from news_cluster import NewsCluster
 
-class TokenBucket:
-    """
-    Manages API Rate Limits (TPM) allowing for bursts.
-    Refills tokens over time to strictly respect the limit.
-    """
-    def __init__(self, max_tokens_per_minute: int):
-        self.capacity = max_tokens_per_minute
-        self.tokens = max_tokens_per_minute
-        self.rate = max_tokens_per_minute / 60.0 # Tokens per second
-        self.last_update = time.time()
-        self.lock = asyncio.Lock()
 
-    async def consume(self, cost: int):
-        """
-        Attempts to consume tokens. If not enough, waits until available.
-        Sleeps OUTSIDE the lock to allow other tasks to proceed if they have tokens 
-        (or to queue up without blocking the event loop logic).
-        """
-        while True:
-            wait_time = 0
-            async with self.lock:
-                now = time.time()
-                elapsed = now - self.last_update
-                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-                self.last_update = now
-
-                if self.tokens >= cost:
-                    self.tokens -= cost
-                    return
-                
-                # Calculate deficit
-                deficit = cost - self.tokens
-                wait_time = deficit / self.rate + 0.1
-            
-            if wait_time > 0:
-                logger.debug(f"⏳ Rate Limit: Waiting {wait_time:.2f}s...")
-                await asyncio.sleep(wait_time)
 
 class NewsReviewerWorker(BaseQueueWorker):
     def __init__(self):
@@ -70,10 +34,8 @@ class NewsReviewerWorker(BaseQueueWorker):
         # Configuration
         self.CONFIDENCE_THRESHOLD = 0.85
         
-        # RATE LIMITER: 
-        # Gemma-3-12b limit is ~15,000 TPM. 
-        # We set it slightly lower (14k) to be safe.
-        self.limiter = TokenBucket(max_tokens_per_minute=14000)
+
+
         self.concurrency = 10  # Increased from 3 to 10 for higher throughput
 
         # Initialize BaseWorker
@@ -236,168 +198,50 @@ class NewsReviewerWorker(BaseQueueWorker):
             logger.error(f"LLM Event Merge Verify Failed: {e}")
             return prop, None
 
-    async def process_single_article_concurrent(self, article_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> bool:
-        """
-        Orchestrates the Review -> LLM -> Write flow for one article.
-        Uses asyncio.to_thread for ALL database operations to avoid blocking.
-        """
-        
-        # --- PHASE 1: READ DATA (Threaded) ---
-        work_data = await asyncio.to_thread(self._get_work_data, article_id, proposal_ids)
-        
-        if not work_data:
-            return False
-            
-        article_context, proposals_data = work_data
-        
-        logger.info(f"🔎 Reviewing '{article_context['title'][:20]}...' ({len(proposals_data)} proposals)")
-
-        match_found = False
-        
-        # --- PHASE 2: PARALLEL EVALUATION ---
-        # Launch all LLM checks concurrently to reduce latency
-        tasks = [self._verify_proposal_llm(p, article_context['context_str']) for p in proposals_data]
-        results = await asyncio.gather(*tasks)
-
-        # Process results in original order (by similarity score)
-        for prop, result in results:
-            if not result:
-                await asyncio.to_thread(
-                    self._mark_proposal_failed,
-                    prop['proposal_id'],
-                    "LLM Verification Failed (Max Retries)"
-                )
-                continue
-
-            # CASE A: MATCH
-            if result.same_event and result.confidence_score >= self.CONFIDENCE_THRESHOLD:
-                logger.success(f"✅ Auto-MERGE: {article_context['title']} ")
-                
-                # --- PHASE 3: WRITE MATCH ---
-                await asyncio.to_thread(
-                    self._execute_merge, 
-                    article_id, 
-                    prop['event_id'], 
-                    prop['proposal_id'], 
-                    result.reasoning
-                )
-                match_found = True
-                break # Stop at the first (highest similarity) confirmed match
-            
-            # CASE B: REJECT
-            else:
-                # --- PHASE 3: WRITE REJECT ---
-                await asyncio.to_thread(
-                    self._mark_proposal_rejected,
-                    prop['proposal_id'],
-                    result.reasoning
-                )
-
-        # --- PHASE 4: NEW EVENT (Threaded) ---
-        if not match_found:
-            # Only create new event if we had at least one valid LLM response (to avoid creating dupes on network error)
-            valid_responses = sum(1 for _, r in results if r is not None)
-            if valid_responses > 0:
-                logger.info(f"🆕 Creating NEW EVENT for: {article_context['title']}")
-                await asyncio.to_thread(self._execute_new_event, article_id)
-
-        return True
-
-    async def process_single_event_merge_concurrent(self, source_event_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> bool:
-        """
-        Orchestrates the Review -> LLM -> Write flow for EVENT-TO-EVENT merges.
-        """
-        # --- PHASE 1: READ DATA ---
-        work_data = await asyncio.to_thread(self._get_event_merge_work_data, source_event_id, proposal_ids)
-        if not work_data: return False
-        
-        source_dict, proposals_data = work_data
-        logger.info(f"🔗 Reviewing Event Merge: '{source_dict['title'][:20]}...' ({len(proposals_data)} candidates)")
-
-        # --- PHASE 2: PARALLEL EVALUATION ---
-        tasks = [self._verify_event_merge_llm(p, source_dict) for p in proposals_data]
-        results = await asyncio.gather(*tasks)
-
-        for prop, result in results:
-            if not result:
-                await asyncio.to_thread(self._mark_proposal_failed, prop['proposal_id'], "LLM Verification Failed")
-                continue
-
-            # CASE A: MATCH
-            if result.same_event and result.confidence_score >= self.CONFIDENCE_THRESHOLD:
-                logger.success(f"⚡ Auto-MERGE EVENTS: {source_dict['title']} -> Target")
-                await asyncio.to_thread(
-                    self._execute_event_merge_action,
-                    source_event_id,
-                    prop['target_event_id'],
-                    prop['proposal_id'],
-                    result.reasoning
-                )
-                break # Stop after first successful merge (source is now dead)
-            
-            # CASE B: REJECT
-            else:
-                await asyncio.to_thread(self._mark_proposal_rejected, prop['proposal_id'], result.reasoning)
-
-        return True
-
     # =========================================================================
     # SYNCHRONOUS DB HELPERS (Run in Threads)
     # =========================================================================
 
     def _get_work_data(self, article_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> Optional[Tuple[Dict, List[Dict]]]:
-        """
-        Fetches all necessary data to process an article.
-        Checks if the article is already merged (optimization).
-        Returns detached dictionaries/strings.
-        """
         with self.SessionLocal() as session:
-            # 1. Fetch Article
             article = session.get(ArticleModel, article_id)
             if not article: return None
 
-            # 2. Optimization: Is it already merged?
-            # Assuming ArticleModel has 'event_id'
+            # Optimization: Is it already merged?
             if getattr(article, 'event_id', None) is not None:
-                logger.warning(f"Article {article.id} already merged. Obsoleting pending proposals.")
-                # Cleanup
+                # Obsolete pending proposals
                 session.execute(
                     update(MergeProposalModel)
-                    .where(
-                        MergeProposalModel.id.in_(proposal_ids),
-                        MergeProposalModel.status.in_(["pending", "processing"])
-                    )
+                    .where(MergeProposalModel.id.in_(proposal_ids))
                     .values(status="rejected", reasoning="Auto-Cleanup: Article already merged.")
                 )
                 session.commit()
                 return None
 
-            # 3. Fetch Proposals
-            # Eager load target event and its articles to build context strings
+            # 1. Fetch Proposals with Target Event ONLY (No deep join on articles)
             stmt = (
                 select(MergeProposalModel)
-                .options(
-                    joinedload(MergeProposalModel.target_event).joinedload(NewsEventModel.articles).joinedload(ArticleModel.contents)
-                )
-                .where(
-                    MergeProposalModel.id.in_(proposal_ids)
-                )
+                .options(joinedload(MergeProposalModel.target_event)) # Shallow Load
+                .where(MergeProposalModel.id.in_(proposal_ids))
                 .order_by(MergeProposalModel.similarity_score.desc())
             )
-            proposals = session.execute(stmt).unique().scalars().all()
-            
+            proposals = session.execute(stmt).scalars().all()
             if not proposals: return None
 
-            # 4. Build Context Strings (Inside the session while objects are attached)
-            article_context_str = self._build_article_context(article)
+            # 2. Build Contexts efficiently
+            article_context_str = self._build_article_context(session, article)
             
             proposals_data = []
             for prop in proposals:
                 if not prop.target_event: continue
+                
+                # Manual efficient fetch of top 3 articles for context
+                event_context = self._build_event_context_optimized(session, prop.target_event)
+                
                 proposals_data.append({
                     'proposal_id': prop.id,
                     'event_id': prop.target_event_id,
-                    'event_context': self._build_event_context(prop.target_event),
+                    'event_context': event_context,
                     'similarity': prop.similarity_score
                 })
 
@@ -405,49 +249,184 @@ class NewsReviewerWorker(BaseQueueWorker):
                 {'id': article.id, 'title': article.title, 'context_str': article_context_str}, 
                 proposals_data
             )
-
     def _get_event_merge_work_data(self, source_event_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> Optional[Tuple[Dict, List[Dict]]]:
         with self.SessionLocal() as session:
-            # Load Source with Articles
-            source = session.query(NewsEventModel).options(
-                joinedload(NewsEventModel.articles).joinedload(ArticleModel.contents)
-            ).filter(NewsEventModel.id == source_event_id).first()
-            
+            source = session.get(NewsEventModel, source_event_id)
             if not source or not source.is_active:
-                # Cleanup proposals if source is dead/inactive
                 session.execute(
                     update(MergeProposalModel)
-                    .where(
-                        MergeProposalModel.id.in_(proposal_ids),
-                        MergeProposalModel.status.in_(["pending", "processing"])
-                    )
-                    .values(status="rejected", reasoning="Auto-Cleanup: Source event inactive.")
+                    .where(MergeProposalModel.id.in_(proposal_ids))
+                    .values(status="rejected", reasoning="Auto-Cleanup: Source inactive.")
                 )
                 session.commit()
                 return None
 
-            # Load Proposals with Targets
+            # 1. Fetch Proposals (Shallow)
             stmt = (
                 select(MergeProposalModel)
-                .options(joinedload(MergeProposalModel.target_event).joinedload(NewsEventModel.articles).joinedload(ArticleModel.contents))
+                .options(joinedload(MergeProposalModel.target_event)) 
                 .where(MergeProposalModel.id.in_(proposal_ids))
                 .order_by(MergeProposalModel.similarity_score.desc())
             )
-            proposals = session.execute(stmt).unique().scalars().all()
-            if not proposals: return None
-
-            source_dict = self._build_event_dict(source)
+            proposals = session.execute(stmt).scalars().all()
+            
+            # 2. Build Contexts
+            # We treat the Source Event effectively as a "Big Article" text
+            source_context_str = self._build_event_context_optimized(session, source)
+            
             proposals_data = []
-            for p in proposals:
-                if not p.target_event: continue
+            for prop in proposals:
+                if not prop.target_event: continue
+                
+                target_context_str = self._build_event_context_optimized(session, prop.target_event)
+                
                 proposals_data.append({
-                    'proposal_id': p.id,
-                    'target_event_id': p.target_event_id,
-                    'target_dict': self._build_event_dict(p.target_event),
-                    'similarity': p.similarity_score
+                    'proposal_id': prop.id,
+                    'target_event_id': prop.target_event_id,
+                    'event_context': target_context_str, # Uniform key for batching
+                    'similarity': prop.similarity_score
                 })
-            return source_dict, proposals_data
 
+            return {'id': source.id, 'title': source.title, 'context_str': source_context_str}, proposals_data
+        
+    async def process_single_article_concurrent(self, article_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> bool:
+        work_data = await asyncio.to_thread(self._get_work_data, article_id, proposal_ids)
+        if not work_data: return False
+        
+        # Reuse common logic
+        return await self._process_batch_verification(
+            entity_id=article_id,
+            work_data=work_data,
+            is_event_merge=False
+        )
+
+    async def process_single_event_merge_concurrent(self, source_event_id: uuid.UUID, proposal_ids: List[uuid.UUID]) -> bool:
+        work_data = await asyncio.to_thread(self._get_event_merge_work_data, source_event_id, proposal_ids)
+        if not work_data: return False
+
+        # Reuse common logic - Event Merges can be batched just like articles!
+        return await self._process_batch_verification(
+            entity_id=source_event_id,
+            work_data=work_data,
+            is_event_merge=True
+        )
+
+    async def _process_batch_verification(self, entity_id, work_data, is_event_merge: bool):
+        """
+        Unified Batch Processor for both Articles and Events.
+        """
+        source_data, proposals_data = work_data
+        logger.info(f"🔎 Reviewing '{source_data['title'][:20]}...' vs {len(proposals_data)} candidates")
+
+        match_found = False
+        BATCH_SIZE = 5
+        all_results = []
+
+        # Batch Loop
+        for i in range(0, len(proposals_data), BATCH_SIZE):
+            batch = proposals_data[i:i + BATCH_SIZE]
+            
+
+
+
+            candidates_payload = [
+                {'id': str(p['proposal_id']), 'text': p['event_context']} 
+                for p in batch
+            ]
+            
+            # Call LLM
+            # Note: We reuse verify_batch_matches even for events. 
+            # Ideally rename the method in LLM to verify_batch_similarity, but this works.
+            batch_results = await self.llm.verify_batch_matches(
+                source_data['context_str'],
+                candidates_payload
+            )
+            all_results.extend(batch_results)
+
+        # Process Results
+        results_map = {res.proposal_id: res for res in all_results}
+
+        for prop_data in proposals_data:
+            pid = str(prop_data['proposal_id'])
+            
+            if pid not in results_map:
+                await asyncio.to_thread(self._mark_proposal_failed, prop_data['proposal_id'], "Batch LLM Missed Item")
+                continue
+
+            result = results_map[pid]
+            
+            if result.same_event and result.confidence_score >= self.CONFIDENCE_THRESHOLD:
+                
+                if is_event_merge:
+                    logger.success(f"⚡ Auto-MERGE EVENTS: {source_data['title']} -> Target")
+                    await asyncio.to_thread(
+                        self._execute_event_merge_action,
+                        entity_id, # source_id
+                        prop_data['target_event_id'],
+                        prop_data['proposal_id'],
+                        result.reasoning
+                    )
+                else:
+                    logger.success(f"✅ Auto-MERGE ARTICLE: {source_data['title']}")
+                    await asyncio.to_thread(
+                        self._execute_merge, 
+                        entity_id, # article_id
+                        prop_data['event_id'], 
+                        prop_data['proposal_id'], 
+                        result.reasoning
+                    )
+                
+                match_found = True
+                break # Stop after first match
+            else:
+                await asyncio.to_thread(self._mark_proposal_rejected, prop_data['proposal_id'], result.reasoning)
+
+        # Handle New Event (Only for Articles, usually we don't create new events from failed Event-Event merges)
+        if not is_event_merge and not match_found and len(all_results) > 0:
+            logger.info(f"🆕 Creating NEW EVENT for: {source_data['title']}")
+            await asyncio.to_thread(self._execute_new_event, entity_id)
+
+        return True
+    def _build_article_context(self, session, article: ArticleModel) -> str:
+        # Fetch content explicitly if missing
+        content_txt = ""
+        if not article.contents:
+             # Lazy load or query
+             content_rec = session.scalar(select(ArticleContentModel).where(ArticleContentModel.article_id == article.id))
+             if content_rec: content_txt = content_rec.content[:2000]
+        else:
+             content_txt = article.contents[0].content[:2000]
+             
+        return f"ARTICLE TITLE: {article.title}\nDATE: {article.published_date}\nTEXT: {content_txt}"
+
+    def _build_event_context_optimized(self, session, event: NewsEventModel) -> str:
+        """
+        Fetches ONLY top 3 articles for the event to save tokens and DB memory.
+        """
+        text = f"EVENT TITLE: {event.title}\n"
+        if event.summary and isinstance(event.summary, dict):
+            text += f"SUMMARY: {event.summary.get('center') or event.summary.get('bias') or ''}\n"
+
+        # Explicit Query for context articles
+        stmt = (
+            select(ArticleModel)
+            .where(ArticleModel.event_id == event.id)
+            .order_by(desc(ArticleModel.published_date))
+            .limit(3)
+        )
+        context_articles = session.scalars(stmt).all()
+        
+        text += "RELATED ARTICLES:\n"
+        for art in context_articles:
+            # Quick fetch content
+            content_snippet = "No Content"
+            content_rec = session.scalar(select(ArticleContentModel.content).where(ArticleContentModel.article_id == art.id))
+            if content_rec:
+                content_snippet = content_rec[:200]
+            
+            text += f"- [{art.published_date}] {art.title} : {content_snippet}...\n"
+            
+        return text
     def _execute_merge(self, article_id: uuid.UUID, event_id: uuid.UUID, proposal_id: uuid.UUID, reason: str):
         """Executes the merge and updates the proposal."""
         with self.SessionLocal() as session:
@@ -553,19 +532,6 @@ class NewsReviewerWorker(BaseQueueWorker):
                 
             text += f"- {art.title} : {sum_txt}... : {content_snippet}... ({art.published_date})\n"
         return text
-
-    def _build_article_context(self, article: ArticleModel) -> str:
-        content = ""
-        if article.contents:
-            content = article.contents[0].content[:2000] 
-        
-        return f"""
-        CANDIDATE ARTICLE:
-        Title: {article.title}
-        Date: {article.published_date}
-        Summary: {article.summary}
-        Content Snippet: {content}
-        """
 
     def _build_event_dict(self, event: NewsEventModel) -> Dict:
         """Builds the dictionary structure expected by verify_event_merge."""

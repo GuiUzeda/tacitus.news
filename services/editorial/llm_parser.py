@@ -97,6 +97,15 @@ class EventMatchSchema(BaseModel):
             return {k: (str(val) if val is not None else "N/A") for k, val in v.items()}
         return v
 
+class BatchMatchResult(BaseModel):
+    proposal_id: str
+    same_event: bool
+    confidence_score: float
+    reasoning: str
+
+class BatchMatchResponse(BaseModel):
+    results: List[BatchMatchResult]
+
 # --- Classes ---
 
 class CloudNewsFilter:
@@ -242,6 +251,89 @@ class CloudNewsAnalyzer:
                 raise e
             logger.error(f"Event Verification Error: {e}")
             return None
+
+    @with_retry(max_retries=5, base_delay=30)
+    async def verify_batch_matches(self, reference_text: str, candidates: List[Dict[str, str]]) -> List[BatchMatchResult]:
+        """
+        Verifies one Reference Article against Multiple Candidates in a SINGLE API call.
+        
+        candidates input format: [{'id': 'proposal_uuid', 'text': 'article content...'}, ...]
+        """
+        if not candidates:
+            return []
+
+        # 1. Build the Batch Prompt
+        ref_snippet = reference_text[:2000] # Slightly shorter to save tokens
+        candidates_str = ""
+        
+        for cand in candidates:
+            # Truncate candidate text to save context
+            snippet = cand['text'][:1500] 
+            candidates_str += f"""
+            ---
+            [CANDIDATE ID: {cand['id']}]
+            TEXT: {snippet}
+            ---
+            """
+
+        prompt = f"""
+        Role: Expert Fact-Checker.
+        Task: Compare the [REFERENCE EVENT] against {len(candidates)} [CANDIDATE ARTICLES].
+        
+        For EACH candidate, determine if it refers to the **EXACT SAME specific real-world event** as the Reference.
+        
+        [REFERENCE EVENT]:
+        "{ref_snippet}"
+        
+        {candidates_str}
+        
+        **CRITERIA:**
+        1. "Same Topic" is NOT enough. Must be the SAME incident.
+        2. Different Dates = Different Events.
+        3. Be strict.
+        
+        **OUTPUT:**
+        Return a JSON Object containing a list of results.
+        Example:
+        {{
+            "results": [
+                {{ "proposal_id": "...", "same_event": true, "confidence_score": 0.9, "reasoning": "Both mention fire at X..." }},
+                {{ "proposal_id": "...", "same_event": false, "confidence_score": 1.0, "reasoning": "Different dates" }}
+            ]
+        }}
+        """
+        response=None
+        try:
+            # Note: Using the Flash model is usually better for high-volume batch tasks if available, 
+            # but sticking to your configured model is fine if it supports JSON mode well.
+            response = await client.aio.models.generate_content(
+                model="gemma-3-12b-it", # Or gemini-1.5-flash for speed
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_schema=BatchMatchResponse # Use the Pydantic schema
+                ),
+            )
+            
+            text_response = response.text
+            if not text_response:
+                logger.warning("CloudNewsAnalyzer received empty response.")
+                return []
+
+            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
+            # If using response_schema, the output is already strictly formatted, 
+            # but we parse it safely just in case using the model_validate logic or direct json load
+            data = json.loads(clean_text)
+            return [BatchMatchResult(**item) for item in data.get('results', [])]
+        except pydantic.ValidationError as e:
+            logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
+            return []
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+                raise e
+            logger.error(f"CloudNewsAnalyzer Error: {e}")
+            return []
+
 
     async def batch_verify_events(self, reference_text: str, candidates: List[str]) -> List[EventMatchSchema]:
         """

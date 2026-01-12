@@ -25,8 +25,8 @@ class NewsMergerScanner:
         
         # Thresholds
         self.AUTO_MERGE_THRESHOLD = 0.05 # Very strict distance (Lower is better for Cosine Distance)
-        self.PROPOSAL_THRESHOLD = 0.22    # Looser distance for proposals
-        self.RRF_THRESHOLD = 0.08         # Minimum RRF score to consider keyword-heavy matches
+        self.PROPOSAL_THRESHOLD = 0.15    # Looser distance for proposals
+        self.RRF_THRESHOLD = 0.12       # Minimum RRF score to consider keyword-heavy matches
         self.SCAN_WINDOW_HOURS = 48      # Only check events updated recently
 
     async def run(self):
@@ -120,12 +120,20 @@ class NewsMergerScanner:
             if not candidate.is_active:
                 continue
 
-            # Check if we already have a pending/rejected proposal for this pair
+            # Check if we already have a pending/rejected proposal for this pair (BIDIRECTIONAL)
             existing_proposal = session.scalar(
                 select(MergeProposalModel)
                 .where(
-                    MergeProposalModel.source_event_id == event.id,
-                    MergeProposalModel.target_event_id == candidate.id
+                    or_(
+                        and_(
+                            MergeProposalModel.source_event_id == event.id,
+                            MergeProposalModel.target_event_id == candidate.id
+                        ),
+                        and_(
+                            MergeProposalModel.source_event_id == candidate.id,
+                            MergeProposalModel.target_event_id == event.id
+                        )
+                    )
                 )
             )
             if existing_proposal:
@@ -158,7 +166,7 @@ class NewsMergerScanner:
                 self._create_proposal(session, event, candidate, vec_dist, reason)
                 session.commit()
 
-    def _create_proposal(self, session, source: NewsEventModel, target: NewsEventModel, score: float, reason: str = None):
+    def _create_proposal(self, session, source: NewsEventModel, target: NewsEventModel, score: float, reason: str|None = None):
         if not reason:
             reason = f"MergerScanner: Vector Dist {score:.3f}"
             

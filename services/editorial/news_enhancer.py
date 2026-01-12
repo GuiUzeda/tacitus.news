@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, select, update, func
 from sqlalchemy.orm import sessionmaker, joinedload
 from loguru import logger
 
@@ -44,11 +44,11 @@ class NewsEnhancerWorker(BaseQueueWorker):
         """
         logger.info(f"🚀 Worker started (Streaming Mode)")
         self._reset_stuck_tasks()
-        self.queue = asyncio.Queue(maxsize=10)
+        self.queue = asyncio.Queue(maxsize=1)
         
         # Start Consumers (Staggered)
         workers = []
-        for i in range(3):
+        for i in range(1):
             workers.append(asyncio.create_task(self._consumer_loop(i)))
             await asyncio.sleep(1.0)
         
@@ -142,6 +142,9 @@ class NewsEnhancerWorker(BaseQueueWorker):
     async def process_item(self, session, job):
         event = job.event
         
+        # Limit articles per run to prevent API exhaustion on large events
+        BATCH_LIMIT = 10
+
         # Fetch articles
         articles = (
             session.query(ArticleModel)
@@ -149,6 +152,7 @@ class NewsEnhancerWorker(BaseQueueWorker):
             .options(joinedload(ArticleModel.contents))
             .options(joinedload(ArticleModel.newspaper))
             .filter(ArticleModel.summary_status == JobStatus.PENDING)
+            .limit(BATCH_LIMIT)
             .all()
         )
 
@@ -178,7 +182,11 @@ class NewsEnhancerWorker(BaseQueueWorker):
         new_summaries_list = []
 
         for article, result in zip(articles, results):
-            if not result or isinstance(result, int): continue
+            if not result or isinstance(result, int):
+                # Mark as failed to avoid infinite loops in partial processing
+                article.summary_status = JobStatus.FAILED
+                session.add(article)
+                continue
 
             # Update Article
             article.main_topics = result.main_topics
@@ -225,17 +233,31 @@ class NewsEnhancerWorker(BaseQueueWorker):
                 event.summary 
             )
             if event_summary:
-                event.summary = event_summary
+                event.summary = event_summary["subtitle"]
+                event.key_points = event_summary["summary"]
+                event.title = event_summary["title"]
                 event.last_summarized_at = datetime.now(timezone.utc)
                 event.articles_at_last_summary = event.article_count 
                 session.add(event)
 
-        # Move to Publisher
-        job.status = JobStatus.PENDING
-        job.queue_name = EventsQueueName.PUBLISHER
-        job.updated_at = datetime.now(timezone.utc)
-        
-        logger.success(f"✅ Enhanced: {event.title} (+{len(new_summaries_list)} articles)")
+        # Check if there are more pending articles for this event
+        remaining_count = session.query(func.count(ArticleModel.id)).filter(
+            ArticleModel.event_id == event.id,
+            ArticleModel.summary_status == JobStatus.PENDING
+        ).scalar()
+
+        if remaining_count > 0:
+            # Keep in Enhancer loop to process next batch
+            job.status = JobStatus.PENDING
+            job.queue_name = EventsQueueName.ENHANCER
+            job.updated_at = datetime.now(timezone.utc)
+            logger.info(f"🔄 Partial Enhancement: {event.title} ({remaining_count} remaining)")
+        else:
+            # All done, move to Publisher
+            job.status = JobStatus.PENDING
+            job.queue_name = EventsQueueName.PUBLISHER
+            job.updated_at = datetime.now(timezone.utc)
+            logger.success(f"✅ Enhanced: {event.title} (Complete)")
 
 if __name__ == "__main__":
     worker = NewsEnhancerWorker()
