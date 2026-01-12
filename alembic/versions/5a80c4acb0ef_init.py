@@ -1,8 +1,8 @@
 """init
 
-Revision ID: 0019d2284619
+Revision ID: 5a80c4acb0ef
 Revises: 
-Create Date: 2026-01-06 19:47:54.807456
+Create Date: 2026-01-11 23:08:44.409382
 
 """
 from typing import Sequence, Union
@@ -12,11 +12,10 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '0019d2284619'
+revision: str = '5a80c4acb0ef'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
-
 from pgvector.sqlalchemy import Vector
 
 
@@ -34,19 +33,25 @@ def upgrade() -> None:
     sa.Column('title', sa.String(), nullable=False),
     sa.Column('subtitle', sa.String(), nullable=True),
     sa.Column('summary', postgresql.JSONB(astext_type=sa.Text()), nullable=True, comment='Structure: {"left": "markdown", "right": "markdown", "center": "markdown"}'),
+    sa.Column('interest_counts', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('ownership_stats', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('article_count', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('last_updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
-    sa.Column('status', sa.Enum('DRAFT', 'ENHANCED', 'PUBLISHED', 'ARCHIVED', name='eventstatus'), nullable=False),
+    sa.Column('status', sa.Enum('DRAFT', 'ENHANCED', 'PUBLISHED', 'ARCHIVED', 'MERGED', name='eventstatus'), nullable=False),
     sa.Column('fe_priority', sa.Integer(), nullable=False),
-    sa.Column('article_count', sa.Integer(), nullable=False),
     sa.Column('bias_distribution', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('stance_distribution', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('clickbait_distribution', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('article_counts_by_bias', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('last_summarized_at', sa.DateTime(), nullable=False),
     sa.Column('articles_at_last_summary', sa.Integer(), nullable=False),
     sa.Column('embedding_centroid', Vector(dim=768), nullable=False),
     sa.Column('search_text', sa.Text(), nullable=True),
     sa.Column('search_vector_ts', postgresql.TSVECTOR(), sa.Computed("to_tsvector('portuguese', search_text)", persisted=True), nullable=False),
+    sa.Column('merged_into_id', sa.UUID(), nullable=True),
+    sa.ForeignKeyConstraint(['merged_into_id'], ['news_events.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ix_active_events_embedding', 'news_events', ['embedding_centroid'], unique=False, postgresql_using='hnsw', postgresql_with={'m': 16, 'ef_construction': 64}, postgresql_ops={'embedding_centroid': 'vector_cosine_ops'}, postgresql_where=sa.text('is_active = true'))
@@ -62,6 +67,7 @@ def upgrade() -> None:
     sa.Column('description', sa.Text(), nullable=False),
     sa.Column('icon_url', sa.String(), nullable=False),
     sa.Column('logo_url', sa.String(), nullable=False),
+    sa.Column('ownership_type', sa.String(), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('articles',
@@ -74,10 +80,13 @@ def upgrade() -> None:
     sa.Column('summary_status', sa.Enum('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', name='jobstatus'), nullable=False),
     sa.Column('subtitle', sa.String(), nullable=True),
     sa.Column('summary', sa.String(), nullable=True),
-    sa.Column('stance_label', sa.String(), nullable=True),
+    sa.Column('stance', sa.Float(), nullable=True),
     sa.Column('stance_reasoning', sa.Text(), nullable=True),
+    sa.Column('clickbait_score', sa.Float(), nullable=True),
+    sa.Column('clickbait_reasoning', sa.Text(), nullable=True),
     sa.Column('main_topics', postgresql.ARRAY(sa.Text()), nullable=True),
     sa.Column('entities', postgresql.ARRAY(sa.Text()), nullable=True),
+    sa.Column('interests', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('key_points', postgresql.ARRAY(sa.Text()), nullable=True),
     sa.Column('embedding', Vector(dim=768), nullable=True),
     sa.Column('newspaper_id', sa.UUID(), nullable=False),
@@ -161,16 +170,20 @@ def upgrade() -> None:
     op.create_index('ix_queue_pending_fifo', 'articles_queue', ['updated_at', 'queue_name'], unique=False, postgresql_where=sa.text("status = 'PENDING'"))
     op.create_table('merge_proposals',
     sa.Column('id', sa.UUID(), nullable=False),
-    sa.Column('source_article_id', sa.UUID(), nullable=False),
+    sa.Column('proposal_type', sa.String(), nullable=False),
+    sa.Column('source_article_id', sa.UUID(), nullable=True),
+    sa.Column('source_event_id', sa.UUID(), nullable=True),
     sa.Column('target_event_id', sa.UUID(), nullable=False),
-    sa.Column('similarity_score', sa.Float(), nullable=False),
+    sa.Column('distance_score', sa.Float(), nullable=False),
     sa.Column('reasoning', sa.Text(), nullable=True),
     sa.Column('status', sa.String(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['source_article_id'], ['articles.id'], ),
+    sa.ForeignKeyConstraint(['source_event_id'], ['news_events.id'], ),
     sa.ForeignKeyConstraint(['target_event_id'], ['news_events.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('source_article_id', 'target_event_id', name='uq_merge_pair')
+    sa.UniqueConstraint('source_article_id', 'target_event_id', name='uq_article_merge_pair'),
+    sa.UniqueConstraint('source_event_id', 'target_event_id', name='uq_event_merge_pair')
     )
     # ### end Alembic commands ###
 

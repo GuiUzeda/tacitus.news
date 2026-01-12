@@ -35,6 +35,18 @@ class NewsFilterWorker(BaseQueueWorker):
             pending_status=JobStatus.PENDING
         )
 
+    async def run(self):
+        logger.info(f"🚀 Worker started for queue: {self.queue_name}")
+        while True:
+            try:
+                count = await self.process_batch()
+                if count == 0:
+                    logger.info(f"Queue {self.queue_name} empty. Sleeping 60s...")
+                    await asyncio.sleep(60)
+            except Exception as e:
+                logger.critical(f"Worker crashed: {e}")
+                await asyncio.sleep(30)
+
     def _fetch_jobs(self, session):
         # Override to join with ArticleModel
         stmt = (

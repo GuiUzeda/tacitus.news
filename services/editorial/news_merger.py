@@ -13,8 +13,9 @@ from sqlalchemy.orm import sessionmaker
 from loguru import logger
 
 from config import Settings
-from news_events_lib.models import NewsEventModel, MergeProposalModel, EventStatus
+from news_events_lib.models import NewsEventModel, MergeProposalModel, EventStatus, JobStatus
 from news_cluster import NewsCluster
+from models import EventsQueueModel, EventsQueueName
 
 class NewsMergerScanner:
     def __init__(self):
@@ -51,22 +52,30 @@ class NewsMergerScanner:
                         MergeProposalModel.source_event_id.is_not(None)
                     )
 
+                    # Filter out events processing in enhancer
+                    processing_subq = select(EventsQueueModel.event_id).where(
+                        EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+                        EventsQueueModel.status == JobStatus.PROCESSING
+                    )
+
                     # Fetch IDs only to keep memory light
                     stmt = (
                         select(NewsEventModel.id)
                         .where(
                             NewsEventModel.is_active == True,
                             NewsEventModel.last_updated_at >= cutoff,
-                            NewsEventModel.status == EventStatus.DRAFT,
-                            NewsEventModel.id.not_in(pending_subq)
+                            # NewsEventModel.status == EventStatus.DRAFT,
+                            NewsEventModel.id.not_in(pending_subq),
+                            NewsEventModel.id.not_in(processing_subq)
                         )
                         .order_by(NewsEventModel.last_updated_at.desc())
                     )
                     event_ids = session.execute(stmt).scalars().all()
 
                 if not event_ids:
-                    logger.info("📭 No active events to scan. leaving")
-                    return
+                    logger.info("📭 No active events to scan. Sleeping 60s...")
+                    await asyncio.sleep(60)
+                    continue
 
                 logger.info(f"🔍 Scanning {len(event_ids)} active events for duplicates...")
 
@@ -96,6 +105,17 @@ class NewsMergerScanner:
 
     def _process_single_event(self, event_id):
         with self.SessionLocal() as session:
+            # Check if source became busy in enhancer since fetch
+            is_busy = session.scalar(
+                select(1).where(
+                    EventsQueueModel.event_id == event_id,
+                    EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+                    EventsQueueModel.status == JobStatus.PROCESSING
+                )
+            )
+            if is_busy:
+                return
+
             event = session.get(NewsEventModel, event_id)
             if event and event.is_active:
                 self._check_event_duplicates(session, event)
@@ -118,6 +138,17 @@ class NewsMergerScanner:
             
             # Skip if candidate is already merged/inactive
             if not candidate.is_active:
+                continue
+
+            # Check if candidate is busy in enhancer
+            candidate_busy = session.scalar(
+                select(1).where(
+                    EventsQueueModel.event_id == candidate.id,
+                    EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+                    EventsQueueModel.status == JobStatus.PROCESSING
+                )
+            )
+            if candidate_busy:
                 continue
 
             # Check if we already have a pending/rejected proposal for this pair (BIDIRECTIONAL)
@@ -144,8 +175,21 @@ class NewsMergerScanner:
             # 1. Auto-Merge (Very High Confidence)
             # Note: Vector distance is Cosine Distance (0 = identical, 1 = opposite)
             if vec_dist < self.AUTO_MERGE_THRESHOLD:
+                # Re-check if candidate became busy during the search/calculation window
+                candidate_busy_now = session.scalar(
+                    select(1).where(
+                        EventsQueueModel.event_id == candidate.id,
+                        EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+                        EventsQueueModel.status == JobStatus.PROCESSING
+                    )
+                )
+                if candidate_busy_now:
+                    return
+
                 logger.warning(f"⚡ AUTO-MERGE: {event.title} -> {candidate.title} (Dist: {vec_dist:.3f})")
                 self.cluster.execute_event_merge(session, event, candidate)
+                # Ensure target is queued for enhancement
+                self.cluster._trigger_event_enhancement(session, candidate.id)
                 session.commit()
                 return # Event is now dead, stop scanning it
 
@@ -175,7 +219,7 @@ class NewsMergerScanner:
             proposal_type="event_merge",
             source_event_id=source.id,
             target_event_id=target.id,
-            similarity_score=float(score),
+            distance_score=float(score),
             status="pending",
             reasoning=reason
         )

@@ -18,6 +18,7 @@ from config import Settings
 from news_events_lib.models import MergeProposalModel, ArticleModel, NewsEventModel, JobStatus, ArticleContentModel
 from llm_parser import CloudNewsAnalyzer, EventMatchSchema, BatchMatchResult
 from news_cluster import NewsCluster
+from models import EventsQueueModel, EventsQueueName
 
 
 
@@ -77,16 +78,6 @@ class NewsReviewerWorker(BaseQueueWorker):
                     # Fetch jobs (Commits 'processing' status, so they are safe to pass around)
                     jobs = self._fetch_jobs(session) 
                     
-                    if not jobs:
-                        logger.info('No more jobs found. Waiting for queue to drain...')
-                        await self.queue.join()
-                        logger.info('Queue drained. Stopping workers...')
-                        for w in workers:
-                            w.cancel()
-                        await asyncio.gather(*workers, return_exceptions=True)
-                        logger.info('All workers stopped. Exiting.')
-                        return
-
                     # Grouping Logic
                     # Sort by source ID (handle None for mixed types)
                     jobs.sort(key=lambda x: str(x.source_article_id or x.source_event_id))
@@ -101,6 +92,10 @@ class NewsReviewerWorker(BaseQueueWorker):
                         
                         await self.queue.put((source_id, proposal_ids, is_event_merge))
                         
+                if not jobs:
+                    logger.info('No more jobs found. Sleeping 60s...')
+                    await asyncio.sleep(60)
+
             except Exception as e:
                 logger.error(f"Producer Error: {e}")
                 await asyncio.sleep(5)
@@ -223,7 +218,7 @@ class NewsReviewerWorker(BaseQueueWorker):
                 select(MergeProposalModel)
                 .options(joinedload(MergeProposalModel.target_event)) # Shallow Load
                 .where(MergeProposalModel.id.in_(proposal_ids))
-                .order_by(MergeProposalModel.similarity_score.desc())
+                .order_by(MergeProposalModel.distance_score)
             )
             proposals = session.execute(stmt).scalars().all()
             if not proposals: return None
@@ -242,7 +237,7 @@ class NewsReviewerWorker(BaseQueueWorker):
                     'proposal_id': prop.id,
                     'event_id': prop.target_event_id,
                     'event_context': event_context,
-                    'similarity': prop.similarity_score
+                    'similarity': prop.distance_score
                 })
 
             return (
@@ -266,7 +261,7 @@ class NewsReviewerWorker(BaseQueueWorker):
                 select(MergeProposalModel)
                 .options(joinedload(MergeProposalModel.target_event)) 
                 .where(MergeProposalModel.id.in_(proposal_ids))
-                .order_by(MergeProposalModel.similarity_score.desc())
+                .order_by(MergeProposalModel.distance_score)
             )
             proposals = session.execute(stmt).scalars().all()
             
@@ -284,7 +279,7 @@ class NewsReviewerWorker(BaseQueueWorker):
                     'proposal_id': prop.id,
                     'target_event_id': prop.target_event_id,
                     'event_context': target_context_str, # Uniform key for batching
-                    'similarity': prop.similarity_score
+                    'similarity': prop.distance_score
                 })
 
             return {'id': source.id, 'title': source.title, 'context_str': source_context_str}, proposals_data
@@ -436,6 +431,16 @@ class NewsReviewerWorker(BaseQueueWorker):
             prop = session.get(MergeProposalModel, proposal_id)
             
             if article and event:
+                # Check if target event is busy in Enhancer
+                is_busy = session.scalar(select(1).where(
+                    EventsQueueModel.event_id == event_id,
+                    EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+                    EventsQueueModel.status == JobStatus.PROCESSING
+                ))
+                if is_busy:
+                    logger.warning(f"⚠️ Skipping merge for {article.title[:20]}: Target Event is busy.")
+                    return
+
                 # 1. Execute Logic
                 self.cluster.execute_merge_action(session, article, event)
                 
@@ -465,6 +470,16 @@ class NewsReviewerWorker(BaseQueueWorker):
              prop = session.get(MergeProposalModel, proposal_id)
              
              if source and target and source.is_active:
+                 # Check if target event is busy in Enhancer
+                 is_busy = session.scalar(select(1).where(
+                     EventsQueueModel.event_id == target_id,
+                     EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+                     EventsQueueModel.status == JobStatus.PROCESSING
+                 ))
+                 if is_busy:
+                     logger.warning(f"⚠️ Skipping event merge: Target {target.title[:20]} is busy.")
+                     return
+
                  self.cluster.execute_event_merge(session, source, target)
                  
                  if prop:

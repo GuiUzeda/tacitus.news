@@ -79,24 +79,22 @@ class EventAggregator:
         if bias not in stance_dist: stance_dist[bias] = {}
         stance_dist[bias][bucket] = stance_dist[bias].get(bucket, 0) + 1
         event.stance_distribution = stance_dist
-        
-        # Update Explicit Article Counts per Bias
-        counts = dict(event.article_counts_by_bias or {})
-        counts[bias] = counts.get(bias, 0) + 1
-        event.article_counts_by_bias = counts
 
     @staticmethod
     def aggregate_clickbait(event: NewsEventModel, bias: str, score: float):
         """
         Aggregates the clickbait score into a running average per bias.
-        Relies on 'article_counts_by_bias' to determine the current article count (N).
+        Uses stance_distribution counts to determine N (enhanced articles).
         """
         if not bias or score is None: return
 
-        # 1. Get N (Count of articles for this bias)
+        # 1. Get N from Stance Distribution (which tracks enhanced articles)
         # We assume aggregate_stance has run first, so the count includes the current article.
-        counts = event.article_counts_by_bias or {}
-        n = counts.get(bias, 0)
+        stance_dist = event.stance_distribution or {}
+        bias_stats = stance_dist.get(bias, {})
+        n = sum(bias_stats.values())
+        
+        if n == 0: n = 1 # Safety fallback
         
         # 2. Update Weighted Average
         cb_dist = dict(event.clickbait_distribution or {})

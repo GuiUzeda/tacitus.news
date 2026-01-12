@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from loguru import logger
 from sqlalchemy import select, func, and_, desc, update, or_
-from sqlalchemy.orm import Session, aliased, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker, joinedload
 from sqlalchemy import create_engine
 from dataclasses import dataclass
 
@@ -17,7 +17,6 @@ from news_events_lib.models import (
     MergeProposalModel,
     JobStatus,
 )
-from torch import diff
 from models import (
     ArticlesQueueModel,
     ArticlesQueueName,
@@ -134,7 +133,9 @@ class NewsCluster:
         """
         # Move articles
         articles = session.scalars(
-            select(ArticleModel).where(ArticleModel.event_id == source_event.id)
+            select(ArticleModel)
+            .options(joinedload(ArticleModel.newspaper))
+            .where(ArticleModel.event_id == source_event.id)
         ).all()
 
         for art in articles:
@@ -144,7 +145,9 @@ class NewsCluster:
 
         # Deactivate Source
         source_event.is_active = False
-        source_event.title = f"[MERGED] {source_event.title}"
+        source_event.title = f"{source_event.title}"
+        source_event.merged_into_id = target_event.id
+        source_event.last_updated_at = datetime.now(timezone.utc)
         session.add(source_event)
 
         # Reject proposals pointing to the dead event
@@ -167,14 +170,27 @@ class NewsCluster:
         )
 
     def _trigger_event_enhancement(self, session: Session, event_id: uuid.UUID):
-        # Check if already pending/processing to avoid duplicate jobs
+        # 1. Check local session cache for pending inserts (to avoid duplicates in same batch)
+        for obj in session.new:
+            if isinstance(obj, EventsQueueModel) and obj.event_id == event_id:
+                return
+
+        # 2. Check Database (Any status)
         existing = session.scalar(
             select(EventsQueueModel).where(
-                EventsQueueModel.event_id == event_id,
-                EventsQueueModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
+                EventsQueueModel.event_id == event_id
             )
         )
-        if not existing:
+
+        if existing:
+            # If it exists, ensure it is PENDING in the ENHANCER queue
+            if existing.queue_name != EventsQueueName.ENHANCER or existing.status != JobStatus.PENDING:
+                existing.status = JobStatus.PENDING
+                existing.queue_name = EventsQueueName.ENHANCER
+                existing.updated_at = datetime.now(timezone.utc)
+                existing.msg = ""
+                session.add(existing)
+        else:
             new_job = EventsQueueModel(
                 event_id=event_id,
                 queue_name=EventsQueueName.ENHANCER,
@@ -390,6 +406,14 @@ class NewsCluster:
         # 4. Aggregate Newspaper Metadata (Bias/Ownership)
         EventAggregator.aggregate_metadata(event, article)
 
+        # Explicitly update article_counts_by_bias
+        if article.newspaper and article.newspaper.bias:
+            bias = article.newspaper.bias
+            # Clone dict to ensure SQLAlchemy detects change on JSONB
+            counts = dict(event.article_counts_by_bias or {})
+            counts[bias] = counts.get(bias, 0) + 1
+            event.article_counts_by_bias = counts
+
         # 5. Link
         article.event_id = event.id
         event.articles.append(article)
@@ -401,6 +425,7 @@ class NewsCluster:
         # 1. Prepare Initial Aggregations
         init_interests = {}
         init_bias = {}
+        init_counts = {}
         init_ownership = {}
 
         # Interests
@@ -414,6 +439,7 @@ class NewsCluster:
         if article.newspaper:
             if article.newspaper.bias:
                 init_bias[article.newspaper.bias] = [str(article.newspaper.id)]
+                init_counts[article.newspaper.bias] = 1
 
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
@@ -430,6 +456,7 @@ class NewsCluster:
             search_text=f"{article.title} {self.derive_search_query(article)}",
             # New Aggregated Fields
             interest_counts=init_interests,
+            article_counts_by_bias=init_counts,
             bias_distribution=init_bias,
             ownership_stats=init_ownership,
         )
@@ -464,7 +491,7 @@ class NewsCluster:
                 id=uuid.uuid4(),
                 source_article_id=article.id,
                 target_event_id=event.id,
-                similarity_score=float(score),
+                distance_score=float(score),
                 status="pending",
                 reasoning=reason,
             )
@@ -490,11 +517,24 @@ class NewsClusterWorker(BaseQueueWorker):
             pending_status=JobStatus.PENDING
         )
 
+    async def run(self):
+        logger.info(f"🚀 Worker started for queue: {self.queue_name}")
+        while True:
+            try:
+                count = await self.process_batch()
+                if count == 0:
+                    logger.info(f"Queue {self.queue_name} empty. Sleeping 60s...")
+                    await asyncio.sleep(60)
+            except Exception as e:
+                logger.critical(f"Worker crashed: {e}")
+                await asyncio.sleep(30)
+
     def _fetch_jobs(self, session):
         # Override to join with ArticleModel
         stmt = (
             select(ArticlesQueueModel, ArticleModel)
             .join(ArticleModel, ArticlesQueueModel.article_id == ArticleModel.id)
+            .options(joinedload(ArticleModel.newspaper, innerjoin=True))
             .where(ArticlesQueueModel.status == self.pending_status)
             .where(ArticlesQueueModel.queue_name == self.queue_name)
             .order_by(ArticleModel.published_date.asc())

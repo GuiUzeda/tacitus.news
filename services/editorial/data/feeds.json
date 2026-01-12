@@ -136,7 +136,7 @@
     "description": "",
     "feeds": [
       {
-        "url": "https://www.r7.com/arc/outboundfeeds/sitemap/latest/"
+        "url": "https://www.r7.com/arc/outboundfeeds/sitemap"
       }
     ]
   },

@@ -70,7 +70,8 @@ class LLMNewsOutputSchema(BaseModel):
     clickbait_reasoning: str
     entities: Dict[str, List[str]]
     main_topics: List[str]
-
+class LLMBatchNewsOutputSchema(BaseModel):
+    results: List[LLMNewsOutputSchema]
 class EventMatchSchema(BaseModel):
     """
     Schema for the Event Co-reference Resolution.
@@ -191,7 +192,71 @@ class CloudNewsAnalyzer:
     def __init__(self):
         # The "Senior" Model
         self.model_id = "gemma-3-27b-it"
+    
+    @with_retry(max_retries=5, base_delay=30)
+    async def analyze_articles_batch(self, texts: List[str]) -> List[LLMNewsOutputSchema]:
+        """
+        Analyzes multiple articles in a single prompt to save tokens on repeated system instructions.
+        """
+        # Prepare the combined text
+        combined_input = ""
+        for i, text in enumerate(texts):
+            # LIMIT CONTEXT: Most news logic is in the first 6k chars. 
+            # 25k is excessive and burns tokens on footers/comments.
+            clean_text = text[:6000] 
+            combined_input += f"\n\n--- ARTICLE {i} ---\n{clean_text}"
 
+        prompt = f"""
+        You are an Intelligence Analyst. Analyze the following {len(texts)} articles.
+        
+        Task: For EACH article provided below, generate a "Briefing Card" in Portuguese.
+        
+        **STYLE RULES:**
+        1. **High Information Density:** Do not use filler words. Every sentence must contain a fact, number, name, or location.
+        2. **Journalistic Tone:** Neutral, objective, direct (AP/Reuters style).
+        3. **No Introduction:** Do not say "The article says...". Just state the facts.
+        4. **Always answer in Portuguese.**
+
+        INPUTS:
+        {combined_input}
+
+        OUTPUT FORMAT:
+        Return a JSON object with a single key "results" containing a LIST of the objects.
+        The list must contain exactly {len(texts)} objects, corresponding to the input articles in order.
+
+        JSON Schema for each object:
+        {{
+            "summary": "Two sentence summary",
+            "key_points": ["Fact-dense sentence 1...", "Fact-dense sentence 2..."],
+            "stance": 0.0, // Float from -1.0 (Critical) to 1.0 (Supportive). 0.0 is Neutral.
+            "stance_reasoning": "Short reasoning",
+            "clickbait_score": 0.0, // Float from 0.0 (Factual) to 1.0 (Clickbait)
+            "clickbait_reasoning": "Short reasoning",
+            "entities": {{ "person": [], "place": [], "org": [], "topic": [] }},
+            "main_topics": ["Topic 1", "Topic 2"]
+        }}
+        """
+        response = None
+        try:
+            response = await client.aio.models.generate_content(
+                model=self.model_id,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                ),
+            )
+            
+            text_response = response.text
+            if not text_response:
+                logger.warning("CloudNewsAnalyzer received empty response.")
+                return []
+
+            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
+            return LLMBatchNewsOutputSchema.model_validate_json(clean_text).results
+            
+        except pydantic.ValidationError as e:
+            logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
+            raise e
     @with_retry(max_retries=5, base_delay=30)
     async def verify_event_match(self, reference_text: str, candidate_text: str) -> EventMatchSchema | None:
         """
@@ -510,6 +575,62 @@ class CloudNewsAnalyzer:
             logger.error(f"Event summarization failed: {e}")
             return None
         
+    @with_retry(max_retries=5, base_delay=30)
+    async def merge_event_summaries(self, target: Dict, sources: List[Dict]) -> Dict | None:
+        """
+        Merges multiple event summaries into one Master Event summary.
+        """
+        def fmt_sum(s):
+            if isinstance(s, dict):
+                return s.get("center") or s.get("bias") or str(s)
+            return str(s) if s else "No summary"
+
+        sources_text = ""
+        for i, s in enumerate(sources):
+            sources_text += f"--- MERGED EVENT {i+1} ---\nTITLE: {s.get('title')}\nSUMMARY: {fmt_sum(s.get('summary'))}\n\n"
+
+        target_text = f"--- TARGET EVENT (MASTER) ---\nTITLE: {target.get('title')}\nSUMMARY: {fmt_sum(target.get('summary'))}\n"
+
+        prompt = f"""
+        You are a Senior Editor. We are merging multiple duplicate/related news events into one Master Event.
+        
+        **OBJECTIVE:**
+        Create a consolidated Title, Subtitle, and Summary that incorporates facts from ALL merged events.
+        
+        **INPUTS:**
+        {target_text}
+        {sources_text}
+        
+        **INSTRUCTIONS:**
+        1. **Title:** Create a definitive title for the combined event.
+        2. **Subtitle:** A short context sentence.
+        3. **Summary:** A neutral, journalistic summary (Markdown bullet points) combining all key facts.
+        4. **Language:** Portuguese (PT-BR).
+        
+        **OUTPUT JSON SCHEMA:**
+        {{
+            "title": "...",
+            "subtitle": "...",
+            "summary": {{
+                "center": "Markdown summary...",
+                "bias": "Merged narrative analysis..."
+            }}
+        }}
+        """
+        
+        response = None
+        try:
+            response = await client.aio.models.generate_content(
+                model="gemma-3-27b-it",
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.2)
+            )
+            clean_text = re.sub(r"```(json)?|```", "", response.text).strip()
+            return json.loads(clean_text)
+        except Exception as e:
+            logger.error(f"Merge summaries failed: {e}")
+            return None
+
     @with_retry(max_retries=5, base_delay=30)
     async def verify_event_merge(self, event_a: Dict, event_b: Dict) -> EventMatchSchema | None:
         """

@@ -294,7 +294,7 @@ class MergeProposalModel(BaseModel):
     # The Target (Always an Event)
     target_event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("news_events.id"))
 
-    similarity_score: Mapped[float] = mapped_column(Float)
+    distance_score: Mapped[float] = mapped_column(Float)
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
     # Status: pending, approved, rejected, needs_human_review, executed, failed

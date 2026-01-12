@@ -22,8 +22,8 @@ class BaseQueueWorker(ABC):
             try:
                 count = await self.process_batch()
                 if count == 0:
-                    # logger.debug(f"Queue {self.queue_name} empty. Sleeping...")
-                    return 
+                    logger.debug(f"Queue {self.queue_name} empty. Sleeping...")
+                    
             except Exception as e:
                 logger.critical(f"Worker crashed: {e}")
                 await asyncio.sleep(30)
