@@ -59,6 +59,7 @@ These scripts are designed to run continuously or periodically to build up the b
 * **Logic:**
     * **Match:** Merges into existing event immediately.
     * **New:** Creates a new event.
+    * **Updates:** Aggregates `editorial_score`, `best_source_rank`, and Interest counts.
     * **Ambiguous:** Creates a MergeProposal and flags it for review.
 * **Run:** `python news_cluster.py`
 
@@ -75,27 +76,31 @@ These scripts are designed to run continuously or periodically to build up the b
 * **Role:** Scans active events to find "Split Brain" duplicates (events that should be merged but were separated).
 * **Intelligence:** Hybrid Search (Vector + Keyword) comparing Event vs Event.
 * **Logic:**
-    * **High Confidence:** Auto-merges events immediately.
-    * **Ambiguous:** Creates an `event_merge` proposal for `news_reviewer.py`.
+    * **Auto-Merge:** Distance < 0.05. Merges events immediately.
+    * **Proposal:** Distance < 0.15 (or < 0.23 with strong keyword match). Creates an `event_merge` proposal.
 * **Run:** `python news_merger.py`
 
 ## 🕹️ Part 2: The Human Loop (CLI)
 
 These steps involve high-level analysis or human finalization.
 
-### 6. news_enhancer.py (The Analyst)
-* **Role:** Reads from ENHANCER queue. Writes the "Briefing Cards," Bias Analysis, and Stance Scoring.
-* **Intelligence:** Uses a "Large LLM" (Gemma-3-27B-IT) to:
-    * Summarize individual articles (bullets).
-    * Calculate Stance (Float from -1.0 Critical to 1.0 Supportive).
-    * Synthesize the "Ground News" style event summary (Left vs. Center vs. Right).
-* **Run:** `python news_enhancer.py`
+### 6. workers/enhancer.py (The Analyst)
+* **Role:** Reads from ENHANCER queue. Aggregates intelligence and prepares the event for publication.
+* **Intelligence:**
+    * **Batch Processing:** Analyzes new articles in batches to extract Entities, Stance, and Clickbait scores.
+    * **Aggregation:** Updates Event-level stats (Bias Distribution, Interest Counts) via `EventAggregator`.
+    * **Summarization:** Generates/Updates the "Ground News" style summary (Left/Center/Right).
+    * **Flow:** Moves completed events to the `PUBLISHER` queue.
+* **Run:** `python workers/enhancer.py`
 
 ### 7. cli.py (The Control Room)
 The central dashboard for the Editor.
-* **[1] Review Merges:** Resolves "Ambiguous Clusters" that news_reviewer.py couldn't handle automatically.
-* **[2] Queue Manager:** Retry failed jobs or inspect pipeline health.
+* **[1] Review Merges:** Resolves "Ambiguous Clusters" (Article-Event or Event-Event).
+* **[2] Queue Manager:** Retry failed jobs, reset stuck processing, or inspect pipeline health.
+* **[3] Manual Search & Link:** Search for events and manually link an article or query.
+* **[4] Inspect Tool:** Deep dive into an Event or Article by ID/Title.
 * **[5] Find & Merge Duplicates:** Utility to clean up split events.
+* **[6] Publishing Review:** Final sign-off for events in the `PUBLISHER` queue before they go live.
 * **Run:** `python cli.py`
 
 ## 🛠️ Setup & Configuration

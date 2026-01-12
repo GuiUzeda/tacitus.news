@@ -166,8 +166,14 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
-            .values(status=JobStatus, reasoning="Target event was merged.")
+            .values(status=JobStatus.REJECTED, reasoning="Target event was merged.")
         )
+        session.execute(
+            update(MergeProposalModel)
+            .where(MergeProposalModel.source_event_id == source_event.id)
+            .values(status=JobStatus.REJECTED, reasoning="Source event was merged.")
+        )
+
         # Remove jobs pendentes do evento morto para não travar workers
         session.execute(
             delete(EventsQueueModel).where(EventsQueueModel.event_id == source_event.id)

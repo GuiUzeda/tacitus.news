@@ -4,18 +4,19 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, update, and_, or_
 from sqlalchemy.orm import Session
 
 # Models
 from news_events_lib.models import (
     NewsEventModel, 
     MergeProposalModel, 
-    JobStatus
+    JobStatus,
+    ArticleModel
 )
 from core.models import EventsQueueModel, EventsQueueName
 from domain.clustering import NewsCluster
@@ -107,7 +108,6 @@ class NewsMergerDomain:
 
                 logger.warning(f"⚡ AUTO-MERGE: {event.title} -> {candidate.title} (Dist: {vec_dist:.3f})")
                 self.cluster.execute_event_merge(session, event, candidate)
-
 
                 session.commit()
                 return # Source event is now dead, stop scanning

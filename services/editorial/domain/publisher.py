@@ -44,7 +44,7 @@ class NewsPublisherDomain:
         if not is_special and event.article_count < 2:
             # Notícia fraca e sem relevância especial. Ignora silenciosamente.
             # Não falhamos o job, apenas deixamos ele lá para tentar de novo se crescer.
-            job.status = JobStatus.FAILED
+            job.status = JobStatus.WAITING
             job.msg = "Low Volume: Waiting for more articles"
             return False
 
