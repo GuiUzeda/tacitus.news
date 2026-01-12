@@ -1,14 +1,15 @@
 import asyncio
 from loguru import logger
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, or_
 from sqlalchemy.orm import sessionmaker, joinedload
 
 from config import Settings
-from base_worker import BaseQueueWorker
+from core.base_worker import BaseQueueWorker
 from domain.publisher import NewsPublisherDomain
 
 # Models
-from models import EventsQueueModel, JobStatus, EventsQueueName
+from news_events_lib.models import JobStatus
+from core.models import EventsQueueModel, EventsQueueName
 
 class NewsPublisherWorker(BaseQueueWorker):
     def __init__(self):
@@ -18,46 +19,67 @@ class NewsPublisherWorker(BaseQueueWorker):
         
         self.domain = NewsPublisherDomain()
 
+        # Configura o Worker Base
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=EventsQueueModel,
-            target_queue_name=None, # Terminal step
-            batch_size=20,
+            target_queue_name=None, # Passo final, não tem próxima fila
+            batch_size=10,
             pending_status=JobStatus.PENDING
         )
 
     def _fetch_jobs(self, session):
-        # Fetch only from PUBLISHER queue
+        """
+        Busca jobs na fila PUBLISHER.
+        """
         stmt = (
             select(EventsQueueModel)
-            .options(joinedload(EventsQueueModel.event))
+            .options(joinedload(EventsQueueModel.event)) # Eager load do evento
             .where(
                 EventsQueueModel.queue_name == EventsQueueName.PUBLISHER,
-                EventsQueueModel.status == JobStatus.PENDING
+                # Pega Pending ou Failed (Retry automático)
+                or_(
+                    EventsQueueModel.status == JobStatus.PENDING,
+                    EventsQueueModel.status == JobStatus.FAILED 
+                )
             )
             .limit(self.batch_size)
-            .with_for_update(skip_locked=True)
+            .with_for_update(skip_locked=True) # Evita conflito com outros workers
         )
         jobs = session.execute(stmt).scalars().all()
         
+        # Marca como Processing imediatamente
         for job in jobs:
             job.status = JobStatus.PROCESSING
         session.commit()
         return jobs
 
     async def process_items(self, session, jobs):
+        """
+        Processa o lote.
+        """
         for job in jobs:
             try:
-                self.domain.publish_event_job(session, job)
-                # Commit after every item to ensure scores are saved immediately
-                session.commit()
+                # O Domain cuida de toda a lógica
+                processed = self.domain.publish_event_job(session, job)
+                
+                if processed:
+                    session.commit() # Salva a publicação
+                else:
+                    # Se retornou False (ignorado), volta para Pending mas com atraso?
+                    # Por simplicidade, deixamos como COMPLETED se foi ignorado por regras de negócio,
+                    # ou o Domain pode setar status específicos.
+                    # Aqui assumimos que o Domain já setou o status do job (COMPLETED ou FAILED).
+                    session.commit()
+                    
             except Exception as e:
-                logger.error(f"Error publishing job {job.id}: {e}")
+                logger.error(f"❌ Error publishing job {job.id}: {e}")
                 session.rollback()
                 job.status = JobStatus.FAILED
-                job.msg = f"Crash: {str(e)}"
+                job.msg = f"Crash: {str(e)[:100]}"
                 session.commit()
 
 if __name__ == "__main__":
+    logger.info("📰 Starting Publisher Worker...")
     worker = NewsPublisherWorker()
     asyncio.run(worker.run())

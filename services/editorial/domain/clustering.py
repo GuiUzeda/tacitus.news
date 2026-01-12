@@ -4,7 +4,7 @@ from typing import List, Optional
 from dataclasses import dataclass
 
 from loguru import logger
-from sqlalchemy import select, func, and_, desc, update, or_
+from sqlalchemy import delete, select, func, and_, desc, update, or_
 from sqlalchemy.orm import Session, aliased, sessionmaker, joinedload
 from sqlalchemy import create_engine
 
@@ -17,6 +17,7 @@ from news_events_lib.models import (
 )
 
 # Service Modules
+from news_events_lib.models import EventStatus
 from core.models import (
     ArticlesQueueModel,
     EventsQueueModel,
@@ -98,38 +99,127 @@ class NewsCluster:
         self._trigger_event_enhancement(session, new_event_id)
         return new_event_id
 
+    def _calculate_editorial_score(self, current_score: float, rank: Optional[int]) -> float:
+        if not rank:
+            return current_score
+        # Rank 1 = 10pts, Rank 2 = 9pts ... Rank 10+ = 1pt
+        points = max(11 - rank, 1)
+        return current_score + float(points)
+
+    # --- MÉTODO DE FUSÃO CENTRALIZADO E SEGURO ---
     def execute_event_merge(
         self,
         session: Session,
         source_event: NewsEventModel,
         target_event: NewsEventModel,
     ):
+        """
+        Funde o Evento A (Source) no Evento B (Target) preservando TODO o histórico.
+        """
+        logger.info(f"🧬 MERGING: {source_event.title} -> {target_event.title}")
+
+        # 1. Mover Artigos (Re-link)
         articles = session.scalars(
-            select(ArticleModel)
-            .options(joinedload(ArticleModel.newspaper))
-            .where(ArticleModel.event_id == source_event.id)
+            select(ArticleModel).where(ArticleModel.event_id == source_event.id)
         ).all()
 
         for art in articles:
-            # We re-link every article to the target
-            self._link_to_event(session, target_event, art, art.embedding)
+            art.event_id = target_event.id
+            session.add(art)
+            target_event.articles.append(art)
+        
+        # 2. HERANÇA DE DADOS (Critical Step)
+        
+        # A. Datas (Expandir a linha do tempo)
+        if source_event.first_article_date:
+            if not target_event.first_article_date or source_event.first_article_date < target_event.first_article_date:
+                target_event.first_article_date = source_event.first_article_date
+        
+        if source_event.last_article_date:
+            if not target_event.last_article_date or source_event.last_article_date > target_event.last_article_date:
+                target_event.last_article_date = source_event.last_article_date
 
-        # Soft Delete Source
+        # B. Scores (Soma)
+        target_event.editorial_score = (target_event.editorial_score or 0.0) + (source_event.editorial_score or 0.0)
+        target_event.article_count += source_event.article_count
+        
+        # C. Rank (Melhor rank vence)
+        if source_event.best_source_rank:
+            if target_event.best_source_rank is None or source_event.best_source_rank < target_event.best_source_rank:
+                target_event.best_source_rank = source_event.best_source_rank
+
+        # D. Viés / Spectrum (Merge de Dicionários)
+        if source_event.article_counts_by_bias:
+            target_counts = dict(target_event.article_counts_by_bias or {})
+            for bias, count in source_event.article_counts_by_bias.items():
+                target_counts[bias] = target_counts.get(bias, 0) + count
+            target_event.article_counts_by_bias = target_counts
+
+        # 3. Tombstone (Enterrar o Source)
         source_event.is_active = False
+        source_event.status = EventStatus.MERGED
         source_event.merged_into_id = target_event.id
         source_event.last_updated_at = datetime.now(timezone.utc)
         session.add(source_event)
 
+        # 4. Limpar Propostas e Filas do Morto
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
-            .values(status="rejected")
+            .values(status="rejected", reasoning="Target event was merged.")
+        )
+        # Remove jobs pendentes do evento morto para não travar workers
+        session.execute(
+            delete(EventsQueueModel).where(EventsQueueModel.event_id == source_event.id)
         )
 
-        self._trigger_event_enhancement(session, target_event.id)
+        # 5. Trigger Next Steps (Para o Sobrevivente)
+        target_event.last_updated_at = datetime.now(timezone.utc)
+        session.add(target_event)
 
-    # --- HELPERS & LOGIC ---
+        # Se o alvo já estava publicado, força re-publicação para atualizar Hot Score e Posição
+        if target_event.status == EventStatus.PUBLISHED:
+            logger.info(f"🔄 Re-Queueing Published Event: {target_event.title}")
+            self._trigger_event_publisher(session, target_event.id)
+        else:
+            # Fluxo normal: vai para o Enhancer (Resumo/LLM)
+            self._trigger_event_enhancement(session, target_event.id)
 
+    # --- HELPERS DE FILA ---
+
+
+    def _trigger_event_publisher(self, session: Session, event_id: uuid.UUID):
+        # Novo método que faltava!
+        self._upsert_queue_job(session, event_id, EventsQueueName.PUBLISHER)
+
+    def _upsert_queue_job(self, session: Session, event_id: uuid.UUID, queue_name: EventsQueueName):
+        """Helper genérico para evitar duplicação de código"""
+        # Verifica se já existe na memória da sessão (evita flush prematuro)
+        for obj in session.new:
+            if isinstance(obj, EventsQueueModel) and obj.event_id == event_id:
+                return
+
+        existing = session.scalar(
+            select(EventsQueueModel).where(EventsQueueModel.event_id == event_id)
+        )
+
+        if existing:
+            # Se já existe, reseta para Pending e atualiza a fila alvo
+            if existing.queue_name != queue_name or existing.status != JobStatus.PENDING:
+                existing.status = JobStatus.PENDING
+                existing.queue_name = queue_name
+                existing.updated_at = datetime.now(timezone.utc)
+                existing.msg = "Re-queued by Merge"
+                session.add(existing)
+        else:
+            new_job = EventsQueueModel(
+                event_id=event_id,
+                queue_name=queue_name, # Pode ser ENHANCER ou PUBLISHER
+                status=JobStatus.PENDING,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            session.add(new_job)
     def _mark_article_queue_completed(self, session: Session, article_id: uuid.UUID):
         session.execute(
             update(ArticlesQueueModel)
@@ -349,7 +439,22 @@ class NewsCluster:
             .with_for_update()
         )
         session.refresh(event)
+        if not event.first_article_date or article.published_date < event.first_article_date:
+            event.first_article_date = article.published_date
+        
+        if not event.last_article_date or article.published_date > event.last_article_date:
+            event.last_article_date = article.published_date
 
+        # 2. Agregar Score Editorial e Rank
+        if article.source_rank:
+            # Melhor Rank Vence (Menor é melhor)
+            if event.best_source_rank is None or article.source_rank < event.best_source_rank:
+                event.best_source_rank = article.source_rank
+            
+            # Acumula pontos
+            event.editorial_score = self._calculate_editorial_score(
+                event.editorial_score, article.source_rank
+            )   
         # --- AGGREGATION PIPELINE (Updated) ---
         
         # 1. Basic Stats (Counts + Dates + Rank Score)

@@ -24,6 +24,7 @@ from news_events_lib.models import (
     JobStatus
 )
 from core.models import ArticlesQueueModel, ArticlesQueueName
+from harvesters.factory import HarvesterFactory
 
 # --- MULTIPROCESSING HELPERS ---
 
@@ -103,8 +104,7 @@ class HarvestingDomain:
     ]
 
     def __init__(self, max_cpu_workers=3):
-        # UPDATED: Use BaseHarvester directly
-        self.harvester = BaseHarvester()
+
         
         # Initialize Executor for CPU tasks
         self.cpu_executor = ProcessPoolExecutor(
@@ -115,6 +115,7 @@ class HarvestingDomain:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
+        self.factory = HarvesterFactory()
 
     def shutdown(self):
         self.cpu_executor.shutdown(wait=True)
@@ -132,11 +133,12 @@ class HarvestingDomain:
             name = newspaper_data["name"]
             # UPDATED: Pass the full feed objects (with patterns/flags)
             feeds = newspaper_data["feeds"]
-            
+            harvester_instance = self.factory.get_harvester(name)
             # 1. Pipeline Execution
             articles_data = await self._run_pipeline(
                 http_session, 
                 feeds, 
+                harvester_instance,
                 name, 
                 newspaper_data["id"], 
                 newspaper_data["article_hashes"]
@@ -159,10 +161,10 @@ class HarvestingDomain:
 
     # --- INTERNAL PIPELINE STEPS ---
 
-    async def _run_pipeline(self, http_session, feeds, name, np_id, ignore_hashes):
+    async def _run_pipeline(self, http_session, feeds, harvester, name, np_id, ignore_hashes):
         # A. Fetch Links (Uses the new BaseHarvester with Browser/Regex support)
         try:
-            raw_entries = await self.harvester.harvest(http_session, feeds)
+            raw_entries = await harvester.harvest(http_session, feeds)
         except Exception as e:
             logger.error(f"[{name}] Link fetch failed: {e}")
             return []

@@ -107,8 +107,8 @@ class NewsMergerDomain:
 
                 logger.warning(f"⚡ AUTO-MERGE: {event.title} -> {candidate.title} (Dist: {vec_dist:.3f})")
                 self.cluster.execute_event_merge(session, event, candidate)
-                # Ensure target is queued for enhancement
-                self.cluster._trigger_event_enhancement(session, candidate.id)
+
+
                 session.commit()
                 return # Source event is now dead, stop scanning
 

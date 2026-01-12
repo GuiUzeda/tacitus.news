@@ -34,56 +34,111 @@ class BaseHarvester:
 
     async def harvest(self, session, sources: List[dict]) -> list[dict]:
         """
-        Main entry point. Dispatches to specific fetchers based on feed_type.
+        Orchestrator: Iterates sources, fetches data, and handles deduplication/merging.
+        DO NOT OVERRIDE THIS in subclasses unless you want to change deduplication logic.
         """
-        articles = []
-        for source in sources:
-            new_articles = []
-            feed_type = source.get("feed_type", "sitemap")
-            use_browser = source.get("use_browser_render", False)
-            is_ranked = source.get("is_ranked", False)
-            
-            # 1. HTML Scraping (The new Rank-aware logic)
-            if feed_type == "html":
-                if use_browser:
-                    new_articles = await self._fetch_from_html_browser(
-                        source["url"],
-                        scroll_depth=source.get("scroll_depth", 0),
-                        blocklist=source.get("blocklist"),
-                        allowed_sections=source.get("allowed_sections"),
-                        url_pattern=source.get("url_pattern"),
-                        is_ranked=is_ranked,
-                    )
-                else:
-                    new_articles = await self._fetch_from_html(
-                        session,
-                        source["url"],
-                        blocklist=source.get("blocklist"),
-                        allowed_sections=source.get("allowed_sections"),
-                        url_pattern=source.get("url_pattern"),
-                        is_ranked=is_ranked,
-                    )
-            
-            # 2. RSS (Legacy)
-            elif feed_type == "rss":
-                new_articles = await self.harvest_rss(
-                    session,
-                    source["url"],
-                    blocklist=source.get("blocklist"),
-                    allowed_sections=source.get("allowed_sections"),
-                )
+        unique_articles = {}
 
-            # 3. Sitemap (Legacy)
-            elif feed_type == "sitemap":
-                new_articles = await self._fetch(
-                    session,
-                    source["url"],
+        for source in sources:
+            # Delegate fetching to a method that subclasses can override
+            try:
+                new_articles = await self.fetch_feed_articles(session, source)
+            except Exception as e:
+                logger.error(f"Feed process failed {source.get('url')}: {e}")
+                continue
+            
+            # Merge Logic (Rank vs Date vs Content)
+            for art in new_articles:
+                url = art["link"]
+                if url in unique_articles:
+                    self._merge_article_data(unique_articles[url], art)
+                else:
+                    unique_articles[url] = art
+
+        return list(unique_articles.values())
+
+    async def fetch_feed_articles(self, session, source: dict) -> List[dict]:
+        """
+        Strategy Implementation: Fetches articles based on feed type.
+        Subclasses should override THIS to add custom logic (e.g. Sitemap Index by Date).
+        """
+        feed_type = source.get("feed_type", "sitemap")
+        use_browser = source.get("use_browser_render", False)
+        is_ranked = source.get("is_ranked", False)
+        url = source["url"]
+        
+        # 1. HTML Scraping
+        if feed_type == "html":
+            if use_browser:
+                return await self._fetch_from_html_browser(
+                    url,
+                    scroll_depth=source.get("scroll_depth", 0),
                     blocklist=source.get("blocklist"),
                     allowed_sections=source.get("allowed_sections"),
+                    url_pattern=source.get("url_pattern"),
+                    is_ranked=is_ranked,
                 )
-                
-            articles.extend(new_articles)
-        return articles
+            else:
+                return await self._fetch_from_html(
+                    session,
+                    url,
+                    blocklist=source.get("blocklist"),
+                    allowed_sections=source.get("allowed_sections"),
+                    url_pattern=source.get("url_pattern"),
+                    is_ranked=is_ranked,
+                )
+        
+        # 2. RSS
+        elif feed_type == "rss":
+            return await self.harvest_rss(
+                session,
+                url,
+                blocklist=source.get("blocklist"),
+                allowed_sections=source.get("allowed_sections"),
+            )
+
+        # 3. Standard Sitemap
+        elif feed_type == "sitemap":
+            return await self._fetch(
+                session,
+                url,
+                blocklist=source.get("blocklist"),
+                allowed_sections=source.get("allowed_sections"),
+            )
+        
+        # 4. Built-in Dynamic Sitemaps (New!)
+        elif feed_type == "sitemap_index_id":
+             # Assumes url_pattern contains the ID regex
+             return await self.harvest_latest_id(
+                 session, url, id_pattern=source.get("url_pattern")
+             )
+             
+        elif feed_type == "sitemap_index_date":
+             # Assumes url_pattern contains the Date regex
+             return await self.harvest_latest_date(
+                 session, url, date_pattern=source.get("url_pattern")
+             )
+
+        return []
+
+    def _merge_article_data(self, existing: dict, new: dict):
+        """Merges metadata, prioritizing Rank and Date."""
+        # Rank: Lower is better. None is worst.
+        old_rank = existing.get("rank")
+        new_rank = new.get("rank")
+
+        if new_rank is not None:
+            if old_rank is None or new_rank < old_rank:
+                existing["rank"] = new_rank
+
+        # Date: If missing, take new.
+        if not existing.get("published") and new.get("published"):
+            existing["published"] = new["published"]
+
+        # Content Snippet
+        if (not existing.get("content") or existing["content"] == "Unknown") and \
+           (new.get("content") and new["content"] != "Unknown"):
+            existing["content"] = new["content"]
 
     async def _fetch_from_html(
         self,
