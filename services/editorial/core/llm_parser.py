@@ -625,11 +625,19 @@ class CloudNewsAnalyzer:
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.2)
             )
-            clean_text = re.sub(r"```(json)?|```", "", response.text).strip()
+            text_response = response.text
+            if not text_response:
+                return None
+            clean_text =  re.sub(r"```(json)?|```", "", text_response).strip()
             return json.loads(clean_text)
-        except Exception as e:
-            logger.error(f"Merge summaries failed: {e}")
+        except pydantic.ValidationError as e:
+            logger.error(f"Event Verification Schema Error: {e}")
             return None
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+                raise e
+            logger.error(f"Event Verification Error: {e}")
+            return None 
 
     @with_retry(max_retries=5, base_delay=30)
     async def verify_event_merge(self, event_a: Dict, event_b: Dict) -> EventMatchSchema | None:

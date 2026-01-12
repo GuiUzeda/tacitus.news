@@ -5,10 +5,17 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "conglomerado",
     "feeds": [
       {
-        "allowed_sections": "(/newsletters/|/economia/|/colunas/|/internacional/|/cotidiano/)",
-        "url": "https://noticias.uol.com.br/sitemap/v2/news-01.xml"
+        "url": "https://uol.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "https://.*/\\d{4}/\\d{2}/\\d{2}/.*\\.htm"
+      },
+      {
+        "url": "https://noticias.uol.com.br/sitemap/v2/news-01.xml",
+        "feed_type": "sitemap"
       }
     ]
   },
@@ -18,7 +25,14 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "conglomerado",
     "feeds": [
+      {
+        "url": "https://oglobo.globo.com",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "https://.*/\\d{4}/\\d{2}/.*\\.ghtml"
+      },
       {
         "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/blogs/)",
         "url": "https://oglobo.globo.com/sitemap/oglobo/news.xml"
@@ -31,13 +45,20 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "conglomerado",
     "feeds": [
       {
-        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/internacional/)",
-        "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap-index-by-day/?outputType=xml"
+        "url": "https://www.estadao.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "estadao\\.com\\.br/(?!tudo-sobre|web-stories|150-anos|acervo|fotos|tv|podcasts|blogs-e-colunas|aplicativos|ultimas|termo-de-uso|correcoes|fale-conosco)(?:[\\w-]+/)+[\\w-]+-[\\w-]+"
       },
       {
-        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/internacional/))",
+        "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap-index-by-day/?outputType=xml",
+        "feed_type": "sitemap_index_date",
+        "url_pattern": "https://www\\.estadao\\.com\\.br/arc/outboundfeeds/sitemap/(\\d{4}-\\d{2}-\\d{2})/\\?outputType=xml"
+      },
+      {
         "url": "https://www.estadao.com.br/arc/outboundfeeds/sitemap/latest/?outputType=xml"
       }
     ]
@@ -48,9 +69,19 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
-        "url": "https://www.poder360.com.br/sitemap_index.xml"
+        "name": "Poder360",
+        "url": "https://www.poder360.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "poder360\\.com\\.br/(?!author|tag|category|search|conteudo-de-marca|conteudo-patrocinado|agregador-de-pesquisas|nieman|poderideias|poderespecial)(?:[\\w-]+)/[\\w-]+"
+      },
+      {
+        "url": "https://www.poder360.com.br/sitemap_index.xml",
+        "url_pattern": "https://www\\.poder360\\.com\\.br/post-sitemap(\\d*)\\.xml",
+        "feed_type": "sitemap_index_id"
       }
     ]
   },
@@ -60,9 +91,14 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "independente",
     "feeds": [
       {
-        "url": "https://iclnoticias.com.br/news-sitemap.xml"
+        "url": "https://iclnoticias.com.br",
+        "feed_type": "html",
+        "url_pattern": "iclnoticias\\.com\\.br/(?!colunistas|contato|expediente|linha-editorial|membro|newsletter|programacao|termos|videos|youtube|login|search|tag|author|meio-ambiente$)(?:[\\w-]+/)?([\\w-]+-[\\w-]+)",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|videos|youtube)",
+        "is_ranked": true
       }
     ]
   },
@@ -72,10 +108,20 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
+        "url": "https://www.cartacapital.com.br",
+        "feed_type": "html",
+        "url_pattern": "cartacapital\\.com\\.br/(?!author|blogs$|cupons|edicao|editora|studiocarta|wp-content|mais-recentes|entrevistas$|videos$|video$)(?:[\\w-]+/)+([\\w-]+-[\\w-]+)",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|cupons|edicao|editora)",
+        "is_ranked": true
+      },
+      {
         "allowed_sections": "(/politica/|/economia/|/mundo/|/justica/|/sociedade/|/cartaexpressa/)",
-        "url": "https://www.cartacapital.com.br/sitemap_index.xml"
+        "url": "https://www.cartacapital.com.br/sitemap_index.xml",
+        "url_pattern": "https://www\\.cartacapital\\.com\\.br/post-sitemap(\\d*)\\.xml",
+        "feed_type": "sitemap_index_id"
       }
     ]
   },
@@ -85,7 +131,14 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
+      {
+        "url": "https://www.folha.uol.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "https://.*/\\d{4}/\\d{2}/.*\\.shtml"
+      },
       {
         "url": "https://www1.folha.uol.com.br/mundo/sitemap.xml"
       },
@@ -106,11 +159,20 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
-        "blocklist": "None",
+        "url": "https://www.cnnbrasil.com.br",
+        "feed_type": "html",
+        "url_pattern": "cnnbrasil\\.com\\.br/(?!tudo-sobre|ao-vivo|lances-ao-vivo|colunas$|horoscopo)(?:[\\w-]+/)+([\\w-]+-[\\w-]+)",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|lances-ao-vivo|ao-vivo)",
+        "is_ranked": true
+      },
+      {
         "allowed_sections": "(/politica/|/economia/|/mundo/)",
-        "url": "https://www.cnnbrasil.com.br/sitemap_index.xml"
+        "url": "https://www.cnnbrasil.com.br/sitemap_index.xml",
+        "url_pattern": "https://www\\.cnnbrasil\\.com\\.br/sitemap/(\\d*)\\.xml",
+        "feed_type": "sitemap_index_id"
       }
     ]
   },
@@ -120,7 +182,15 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
+      {
+        "url": "https://g1.globo.com",
+        "feed_type": "html",
+        "url_pattern": "g1\\.globo\\.com/(?!loterias|previsao-do-tempo|videos|index)(?:[\\w-]+/)+(\\d{4}/\\d{2}/\\d{2}/)?[\\w-]+\\.ghtml",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|loterias|previsao-do-tempo)",
+        "is_ranked": true
+      },
       {
         "blocklist": "None",
         "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/)",
@@ -134,6 +204,7 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
         "url": "https://www.r7.com/arc/outboundfeeds/sitemap"
@@ -146,9 +217,18 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
-        "url": "https://jovempan.com.br/feed"
+        "url": "https://jovempan.com.br",
+        "feed_type": "html",
+        "url_pattern": "jovempan\\.com\\.br/(?!videos|podcasts|programas|conteudo-patrocinado|edicase|apostas-online|afiliadas|anuncie)(?:[\\w-]+/)+[\\w-]+\\.html",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|videos|podcasts|programas|edicase)",
+        "is_ranked": true
+      },
+      {
+        "url": "https://jovempan.com.br/feed",
+        "feed_type": "rss"
       }
     ]
   },
@@ -158,7 +238,17 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
+      {
+        "url": "https://www.band.com.br",
+        "feed_type": "html",
+        "use_browser_render": true,
+        "scroll_depth": 3,
+        "url_pattern": "band\\.com\\.br/(?!band-shop|ao-vivo|videos|podcasts|programacao|tudo-sobre|web-stories|conteudo-patrocinado|horoscopo)(?:[\\w-]+/)+[\\w-]+-\\d{6,}",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|band-shop|ao-vivo|videos|podcasts|programacao|horoscopo)",
+        "is_ranked": true
+      },
       {
         "url": "https://api.bs.vibra.digital/api/v1/BandArticle?sort=-createdAt&limit=50&_channel=Band"
       }
@@ -170,7 +260,16 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
+      {
+        "name": "InfoMoney",
+        "url": "https://www.infomoney.com.br",
+        "feed_type": "html",
+        "url_pattern": "infomoney\\.com\\.br/(?!ferramentas|cotacoes|tudo-sobre|web-stories|conteudos|patrocinados|perfil|authentication|fale-conosco|guias)(?:[\\w-]+/)+[\\w-]+-[\\w-]+",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|web-stories|ferramentas|cotacoes|conteudos)",
+        "is_ranked": true
+      },
       {
         "url": "https://www.infomoney.com.br/news-sitemap.xml"
       }
@@ -182,6 +281,7 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
         "url": "https://www.opovo.com.br/sitemap-news-day.xml"
@@ -194,10 +294,37 @@
     "icon_url": "",
     "logo_url": "",
     "description": "",
+    "ownership_type": "",
     "feeds": [
       {
+        "url": "https://www.metropoles.com",
+        "feed_type": "html",
+        "url_pattern": "metropoles\\.com/(?!conteudo-especial|apostas|fale-com-o-metropoles|expediente|anuncie)(?:[\\w-]+/)+[\\w-]+-[\\w-]+-[\\w-]+",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|apostas|conteudo-especial)",
+        "is_ranked": true
+      },
+      {
+        "url": "https://www.metropoles.com/sitemap/noticias-{{today}}.xml",
+        "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)"
+      },
+      {
         "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)",
-        "url": "https://www.metropoles.com/sitemap.xml"
+        "url": "https://www.metropoles.com/sitemap.xml",
+        "url_pattern": "https://www\\.metropoles\\.com/sitemap/noticias-(\\d{4}-\\d{2}-\\d{2})\\.xml",
+        "feed_type": "sitemap_index_date"
+      }
+    ]
+  },
+  {
+    "name": "Valor",
+    "bias": "right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "",
+    "ownership_type": "",
+    "feeds": [
+      {
+        "url": "https://valor.globo.com/sitemap/valor/news.xml"
       }
     ]
   }

@@ -6,7 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from news_events_lib.models import AuthorModel, ArticleModel, ArticleContentModel, FeedModel, NewspaperModel, BaseModel
-from services.editorial.models import ArticlesQueueModel, EventsQueueModel
+from services.editorial.core.models import ArticlesQueueModel, EventsQueueModel
 
 
 

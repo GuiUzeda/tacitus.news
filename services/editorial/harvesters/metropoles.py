@@ -10,32 +10,14 @@ class MetropolesHarvester(BaseHarvester):
     ):
         super().__init__(cutoff)
 
-    async def harvest(self, session, sources) -> list[dict]:
-        url_harvesters = {
-            "https://www.metropoles.com/sitemap.xml": partial(
-                self.harvest_latest_date,
-                date_pattern=r"https://www\.metropoles\.com/sitemap/noticias-(\d{4}-\d{2}-\d{2})\.xml",
-            ),
-        }
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_sitemap_url = f"https://www.metropoles.com/sitemap/noticias-{today}.xml"
-        sources.append(
-            {
-                "url": today_sitemap_url,
-                "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)",
-            }
-        )
-
-        articles = []
-        for source in sources:
-            harvester = url_harvesters.get(source["url"], super()._fetch)
-            articles.extend(
-                await harvester(
-                    session=session,
-                    url=source["url"],
-                    blocklist=source.get("blocklist"),
-                    allowed_sections=source.get("allowed_sections"),
-                )
+    async def fetch_feed_articles(self, session, source) -> list[dict]:
+        url = source["url"]
+        if url == "https://www.metropoles.com/sitemap/noticias-{{today}}.xml":
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_url = url.format(
+                today=today
             )
-        return articles
+            
+            source["url"] = today_url
+            return await super().fetch_feed_articles(session, source)
+        return await super().fetch_feed_articles(session, source)

@@ -28,6 +28,7 @@ from sqlalchemy.orm import (
     relationship,
 )
 from pgvector.sqlalchemy import Vector
+from websockets import serve
 
 VECTOR_DIM = 768
 
@@ -41,10 +42,13 @@ class EventStatus(str, enum.Enum):
 
 
 class JobStatus(enum.Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    WAITING = "WAITING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
 
 
 class BaseModel(DeclarativeBase):
@@ -128,7 +132,17 @@ class NewsEventModel(BaseModel):
     merged_into: Mapped[Optional["NewsEventModel"]] = relationship(
         remote_side=[id], backref="merged_children"
     )
+    hot_score: Mapped[float] = mapped_column(Float, default=0.0,server_default="0.0", index=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
 
+    # (e.g., if CNN had it at #1, this is 1)
+    best_source_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    
+    first_article_date = mapped_column(DateTime, nullable=True)
+    last_article_date = mapped_column(DateTime, nullable=True)
+    
+    # New Field: Sum of editorial weights (e.g. CNN#1 + Fox#5)
+    editorial_score: Mapped[float] = mapped_column(Float, default=0.0)   
     __table_args__ = (
         Index(
             "ix_active_events_embedding",
@@ -202,7 +216,7 @@ class ArticleModel(BaseModel):
     contents: Mapped[List["ArticleContentModel"]] = relationship(
         back_populates="article", cascade="all, delete-orphan"
     )
-
+    source_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     __table_args__ = (Index("ix_article_event_date", "event_id", "published_date"),)
 
 
@@ -257,7 +271,14 @@ class FeedModel(BaseModel):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     blocklist: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     allowed_sections: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
+    url_pattern: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    feed_type: Mapped[str] = mapped_column(String, server_default="sitemap")
+    is_ranked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # New flag: If True, uses Playwright. If False, uses aiohttp.
+    use_browser_render: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    
+    # Optional: How many times to scroll down to load more content?
+    scroll_depth: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 class AuthorModel(BaseModel):
     @declared_attr.directive
@@ -297,8 +318,8 @@ class MergeProposalModel(BaseModel):
     distance_score: Mapped[float] = mapped_column(Float)
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    # Status: pending, approved, rejected, needs_human_review, executed, failed
-    status: Mapped[str] = mapped_column(String, default="pending") 
+    # Status: PENDING, APPROVED, REJECTED, FAILED, PROCESSING
+    status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
 
@@ -312,6 +333,8 @@ class MergeProposalModel(BaseModel):
     target_event: Mapped["NewsEventModel"] = relationship(
         foreign_keys=[target_event_id]
     )
+
+
 
     __table_args__ = (
         # Unique constraint for Article merges

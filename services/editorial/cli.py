@@ -13,16 +13,28 @@ from rich.panel import Panel
 from rich.prompt import Prompt, IntPrompt, Confirm
 from rich.markdown import Markdown
 
+# --- REFACTORED IMPORTS ---
 from config import Settings
-from models import (
+
+# Core (Shared Models & Utils)
+from core.nlp_service import NLPService
+from core.models import (
     ArticlesQueueModel,
     EventsQueueModel, 
     JobStatus,
     EventsQueueName,
 )
-from news_events_lib.models import ArticleModel, NewsEventModel, MergeProposalModel, EventStatus
-from news_cluster import NewsCluster
-from nlp_service import NLPService
+
+# Domain Services (The "Brains")
+from domain.clustering import NewsCluster
+
+# Shared Lib
+from news_events_lib.models import (
+    ArticleModel, 
+    NewsEventModel, 
+    MergeProposalModel, 
+    EventStatus
+)
 
 console = Console()
 settings = Settings()
@@ -32,7 +44,9 @@ SessionLocal = sessionmaker(bind=engine)
 
 class EditorialCLI:
     def __init__(self):
+        # Use the Domain Service
         self.cluster_service = NewsCluster()
+        # Use the Core Service
         self.nlp_service = NLPService()
 
     def start(self):
@@ -43,7 +57,7 @@ class EditorialCLI:
             )
 
             with SessionLocal() as session:
-                pending_props = session.query(MergeProposalModel).filter_by(status="pending").count()
+                pending_props = session.query(MergeProposalModel).filter_by(status=JobStatus.PENDING).count()
                 failed_arts = session.query(ArticlesQueueModel).filter_by(status=JobStatus.FAILED).count()
                 failed_evts = session.query(EventsQueueModel).filter_by(status=JobStatus.FAILED).count()
                 active_events = session.query(NewsEventModel).filter_by(is_active=True).count()
@@ -78,6 +92,8 @@ class EditorialCLI:
                 console.print("Bye! 👋")
                 sys.exit(0)
 
+    # ... [Rest of the methods remain mostly the same, but use self.cluster_service which is now domain.NewsCluster] ...
+
     def review_merges(self):
         with SessionLocal() as session:
             stmt = (
@@ -87,7 +103,7 @@ class EditorialCLI:
                     joinedload(MergeProposalModel.source_event),
                     joinedload(MergeProposalModel.target_event),
                 )
-                .where(MergeProposalModel.status == "pending")
+                .where(MergeProposalModel.status == JobStatus.PENDING)
                 .order_by(
                     MergeProposalModel.distance_score,
                 )
@@ -107,7 +123,6 @@ class EditorialCLI:
             console.clear()
             console.rule("🕵️  Review Merges Dashboard")
             
-            # Summary Grid
             grid = Table.grid(expand=True, padding=(0, 2))
             grid.add_column(justify="center", ratio=1)
             grid.add_column(justify="center", ratio=1)
@@ -140,7 +155,6 @@ class EditorialCLI:
 
     def _review_article_merges(self, proposals):
         from itertools import groupby
-        # Sort by article ID for grouping
         proposals.sort(key=lambda x: str(x.source_article_id))
         grouped_props = {
             k: list(v)
@@ -229,7 +243,6 @@ class EditorialCLI:
 
     def _review_event_merges(self, proposals):
         from itertools import groupby
-        # Sort by source event id first for groupby
         proposals.sort(key=lambda x: str(x.source_event_id))
         
         grouped = {
@@ -250,7 +263,6 @@ class EditorialCLI:
             console.clear()
             console.rule(f"🔗 Event Merge Review {idx}/{total}", style="magenta")
 
-            # Source Event Display
             source_text = f"[bold]{source.title}[/bold]\n"
             source_text += f"[dim]ID: {source.id}[/dim]\n"
             source_text += f"📅 {source.created_at.strftime('%Y-%m-%d')} | 📰 {source.article_count} Articles"
@@ -260,7 +272,6 @@ class EditorialCLI:
             
             console.print(Panel(source_text, title="🔻 SOURCE EVENT (To be dissolved)", border_style="red"))
 
-            # Candidates Table
             table = Table(show_header=True, header_style="bold magenta", title="Target Candidates (Master)")
             table.add_column("#", style="dim", width=4)
             table.add_column("Target Event")
@@ -281,7 +292,6 @@ class EditorialCLI:
                 )
             console.print(table)
 
-            # Actions
             menu_text = (
                 f"[bold green]1-{len(props)}[/bold green] : Merge Source into Target #\n"
                 "[bold red]r[/bold red]   : Reject All (Keep Separate)\n"
@@ -312,11 +322,8 @@ class EditorialCLI:
                 self._execute_event_merge_cli(props[int(choice) - 1])
                 return "next"
 
-    # --- EXECUTION (DELEGATED TO CLUSTER SERVICE) ---
-
     def _execute_merge(self, proposal):
         with SessionLocal() as session:
-            # Re-fetch active objects
             article = session.get(ArticleModel, proposal.source_article_id)
             event = session.get(NewsEventModel, proposal.target_event_id)
             
@@ -324,6 +331,7 @@ class EditorialCLI:
                 console.print("[red]Object not found in DB[/red]")
                 return
 
+            # Call Domain Logic
             self.cluster_service.execute_merge_action(session, article, event)
             
             session.commit()
@@ -337,6 +345,7 @@ class EditorialCLI:
                 console.print("[red]Article not found[/red]")
                 return
 
+            # Call Domain Logic
             self.cluster_service.execute_new_event_action(session, article, reason="Manual CLI")
             
             session.commit()
@@ -345,7 +354,6 @@ class EditorialCLI:
 
     def _execute_event_merge_cli(self, proposal):
         with SessionLocal() as session:
-            # Re-fetch
             prop = session.get(MergeProposalModel, proposal.id)
             source = session.get(NewsEventModel, prop.source_event_id)
             target = session.get(NewsEventModel, prop.target_event_id)
@@ -354,10 +362,10 @@ class EditorialCLI:
                 console.print("[red]Objects missing.[/red]")
                 return
 
+            # Call Domain Logic
             self.cluster_service.execute_event_merge(session, source, target)
             
-            # Update proposal status manually since cluster service doesn't know about this specific proposal ID
-            prop.status = "approved"
+            prop.status = JobStatus.APPROVED
             prop.reasoning = "Manual CLI Approval"
             session.add(prop)
             
@@ -370,7 +378,7 @@ class EditorialCLI:
             for p in proposals:
                 db_p = session.get(MergeProposalModel, p.id)
                 if db_p:
-                    db_p.status = "rejected"
+                    db_p.status = JobStatus.REJECTED
                     db_p.reasoning = "Manual CLI Rejection"
             session.commit()
             console.print("[yellow]🚫 Proposals rejected. Events kept separate.[/yellow]")
@@ -381,6 +389,7 @@ class EditorialCLI:
         console.rule("🔎 Manual Search & Link")
 
         with SessionLocal() as session:
+            target_date = None
             if not article:
                 query = Prompt.ask("Enter search query")
                 vector = self.nlp_service.calculate_vector(query)
@@ -390,8 +399,17 @@ class EditorialCLI:
                 console.print(f"Searching for: [cyan]{article_db.title}[/cyan]")
                 query = Prompt.ask("Refine Query", default=self.cluster_service.derive_search_query(article_db))
                 vector = article_db.embedding
+                # Use article date to scope search
+                target_date = article_db.published_date
 
-            results = self.cluster_service.search_news_events_hybrid(session, query, vector, limit=10)
+            # Updated call to match Domain Service signature (passing date if available)
+            results = self.cluster_service.search_news_events_hybrid(
+                session, 
+                query, 
+                vector, 
+                target_date=target_date if target_date else datetime.now(timezone.utc),
+                limit=10
+            )
             
             table = Table(title=f"Results for '{query}'")
             table.add_column("#"); table.add_column("Event"); table.add_column("Score")
@@ -408,7 +426,6 @@ class EditorialCLI:
                 if 0 <= idx < len(candidates):
                     target = candidates[idx]
                     
-                    # Re-fetch for safety
                     art_db = session.get(ArticleModel, article.id)
                     ev_db = session.get(NewsEventModel, target.id)
                     
@@ -441,7 +458,11 @@ class EditorialCLI:
 
             console.print(f"\n🔎 Searching duplicates for: [bold]{target_event.title}[/bold]...")
             results = self.cluster_service.search_news_events_hybrid(
-                session, target_event.search_text or target_event.title, target_event.embedding_centroid, limit=20
+                session, 
+                target_event.search_text or target_event.title, 
+                target_event.embedding_centroid, 
+                target_date=target_event.created_at,
+                limit=20
             )
             candidates = [r[0] for r in results if r[0].id != target_event.id]
             if not candidates:
@@ -472,7 +493,6 @@ class EditorialCLI:
             console.rule("🚑 Queue Manager")
 
             with SessionLocal() as session:
-                # Articles Stats
                 a_stats = (
                     session.query(
                         ArticlesQueueModel.queue_name,
@@ -483,7 +503,6 @@ class EditorialCLI:
                     .all()
                 )
 
-                # Events Stats
                 e_stats = (
                     session.query(
                         EventsQueueModel.queue_name,
@@ -501,7 +520,9 @@ class EditorialCLI:
             for q, s, c in a_stats:
                 status_str = s.value if hasattr(s, 'value') else str(s)
                 queue_str = q.value if hasattr(q, 'value') else str(q)
-                color = "red" if s == JobStatus.FAILED else "green"
+                if s == JobStatus.FAILED: color = "red"
+                elif s == JobStatus.WAITING: color = "yellow"
+                else: color = "green"
                 table.add_row(queue_str, f"[{color}]{status_str}[/{color}]", str(c))
             console.print(table)
 
@@ -512,11 +533,12 @@ class EditorialCLI:
             for q, s, c in e_stats:
                 status_str = s.value if hasattr(s, 'value') else str(s)
                 queue_str = q.value if hasattr(q, 'value') else str(q)
-                color = "red" if s == JobStatus.FAILED else "green"
+                if s == JobStatus.FAILED: color = "red"
+                elif s == JobStatus.WAITING: color = "yellow"
+                else: color = "green"
                 table2.add_row(queue_str, f"[{color}]{status_str}[/{color}]", str(c))
             console.print(table2)
 
-            # Proposals Stats
             p_stats = (
                 session.query(
                     MergeProposalModel.status,
@@ -528,12 +550,13 @@ class EditorialCLI:
             table3 = Table(title="Proposals Queue")
             table3.add_column("Status"); table3.add_column("Count")
             for s, c in p_stats:
-                color = "red" if s == "failed" else "green"
+                color = "red" if s == JobStatus.FAILED else "green"
                 table3.add_row(f"[{color}]{s}[/{color}]", str(c))
             console.print(table3)
 
             console.print("\n[1] Manage Articles Queue   [2] Manage Events Queue   [3] Manage Proposals Queue")
             console.print("\\[rt] Retry ALL Failed     \\[c] Clear ALL Completed  \\[r] Refresh Totals")
+            console.print("\\[rp] Reset Stuck Processing (All Queues)")
             console.print("\\[b] Back")
             
             choice = Prompt.ask("Action")
@@ -548,9 +571,30 @@ class EditorialCLI:
                 self._manage_specific_queue(EventsQueueModel, "Events Queue")
             elif choice == "3":
                 self._manage_proposals_queue()
+            elif choice == "rp":
+                with SessionLocal() as session:
+                    res1 = session.execute(
+                        update(ArticlesQueueModel)
+                        .where(ArticlesQueueModel.status == JobStatus.PROCESSING)
+                        .values(status=JobStatus.PENDING, msg="Manual Reset")
+                    )
+                    res2 = session.execute(
+                        update(EventsQueueModel)
+                        .where(EventsQueueModel.status == JobStatus.PROCESSING)
+                        .values(status=JobStatus.PENDING, msg="Manual Reset")
+                    )
+                    res3 = session.execute(
+                        update(MergeProposalModel)
+                        .where(MergeProposalModel.status == JobStatus.PROCESSING)
+                        .values(status=JobStatus.PENDING, reasoning="Manual Reset")
+                    )
+                    session.commit()
+                    console.print(
+                        f"[green]Reset {res1.rowcount} Arts, {res2.rowcount} Evts, {res3.rowcount} Props.[/green]"
+                    )
+                    time.sleep(1)
             elif choice == "rt":
                 with SessionLocal() as session:
-                    # Retry both queues
                     res1 = session.execute(
                         update(ArticlesQueueModel)
                         .where(ArticlesQueueModel.status == JobStatus.FAILED)
@@ -563,8 +607,8 @@ class EditorialCLI:
                     )
                     res3 = session.execute(
                         update(MergeProposalModel)
-                        .where(MergeProposalModel.status == "failed")
-                        .values(status="pending", reasoning=None)
+                        .where(MergeProposalModel.status == JobStatus.FAILED)
+                        .values(status=JobStatus.PENDING, reasoning=None)
                     )
                     session.commit()
                     console.print(
@@ -585,7 +629,7 @@ class EditorialCLI:
                     )
                     session.execute(
                         delete(MergeProposalModel).where(
-                            MergeProposalModel.status.in_(["approved", "rejected"])
+                            MergeProposalModel.status.in_([JobStatus.APPROVED, JobStatus.REJECTED])
                         )
                     )
                     session.commit()
@@ -598,7 +642,6 @@ class EditorialCLI:
             console.rule(f"🔧 Managing: {title}")
             
             with SessionLocal() as session:
-                # Stats
                 stats = (
                     session.query(
                         model_class.queue_name,
@@ -616,11 +659,12 @@ class EditorialCLI:
                 for q, s, c in stats:
                     status_str = s.value if hasattr(s, 'value') else str(s)
                     queue_str = q.value if hasattr(q, 'value') else str(q)
-                    color = "red" if s == JobStatus.FAILED else "green"
+                    if s == JobStatus.FAILED: color = "red"
+                    elif s == JobStatus.WAITING: color = "yellow"
+                    else: color = "green"
                     table.add_row(queue_str, f"[{color}]{status_str}[/{color}]", str(c))
                 console.print(table)
                 
-                # Show recent failures
                 failures = (
                     session.query(model_class)
                     .filter(model_class.status == JobStatus.FAILED)
@@ -640,6 +684,7 @@ class EditorialCLI:
                     console.print(ftable)
 
             console.print("\n\\[r] Retry Failed (This Queue)")
+            console.print("\\[rp] Reset Stuck Processing")
             console.print("\\[c] Clear Completed (This Queue)")
             console.print("\\[v] View Pending Jobs")   
             console.print("\\[b] Back")
@@ -647,6 +692,17 @@ class EditorialCLI:
             choice = Prompt.ask("Action")
             
             if choice == "b": return
+            
+            if choice == "rp":
+                with SessionLocal() as session:
+                    res = session.execute(
+                        update(model_class)
+                        .where(model_class.status == JobStatus.PROCESSING)
+                        .values(status=JobStatus.PENDING, msg="Manual Reset")
+                    )
+                    session.commit()
+                    console.print(f"[green]Reset {res.rowcount} stuck jobs.[/green]")
+                    time.sleep(1)
             
             if choice == "r":
                 with SessionLocal() as session:
@@ -686,13 +742,13 @@ class EditorialCLI:
                 table = Table(title="Statistics")
                 table.add_column("Status"); table.add_column("Count")
                 for s, c in stats:
-                    color = "red" if s == "failed" else "green"
+                    color = "red" if s == JobStatus.FAILED else "green"
                     table.add_row(f"[{color}]{s}[/{color}]", str(c))
                 console.print(table)
                 
                 failures = (
                     session.query(MergeProposalModel)
-                    .filter(MergeProposalModel.status == "failed")
+                    .filter(MergeProposalModel.status == JobStatus.FAILED)
                     .limit(5).all()
                 )
                 if failures:
@@ -703,16 +759,26 @@ class EditorialCLI:
                         ftable.add_row(str(f.id)[:8], str(f.reasoning or "No error"))
                     console.print(ftable)
 
-            console.print("\n\\[r] Retry Failed   \\[c] Clear Completed/Rejected   \\[v] View Pending   \\[b] Back")
+            console.print("\n\\[r] Retry Failed   \\[rp] Reset Stuck Processing   \\[c] Clear Completed/Rejected   \\[v] View Pending   \\[b] Back")
             choice = Prompt.ask("Action")
             
             if choice == "b": return
+            if choice == "rp":
+                with SessionLocal() as session:
+                    res = session.execute(
+                        update(MergeProposalModel)
+                        .where(MergeProposalModel.status == JobStatus.PROCESSING)
+                        .values(status=JobStatus.PENDING, reasoning="Manual Reset")
+                    )
+                    session.commit()
+                    console.print(f"[green]Reset {res.rowcount} stuck proposals.[/green]")
+                    time.sleep(1)
             if choice == "r":
                 with SessionLocal() as session:
                     res = session.execute(
                         update(MergeProposalModel)
-                        .where(MergeProposalModel.status == "failed")
-                        .values(status="pending", reasoning=None)
+                        .where(MergeProposalModel.status == JobStatus.FAILED)
+                        .values(status=JobStatus.PENDING, reasoning=None)
                     )
                     session.commit()
                     console.print(f"[green]Retried {res.rowcount} proposals.[/green]")
@@ -720,7 +786,7 @@ class EditorialCLI:
             if choice == "c":
                 with SessionLocal() as session:
                     res = session.execute(
-                        delete(MergeProposalModel).where(MergeProposalModel.status.in_(["approved", "rejected"]))
+                        delete(MergeProposalModel).where(MergeProposalModel.status.in_([JobStatus.APPROVED, JobStatus.REJECTED]))
                     )
                     session.commit()
                     console.print(f"[green]Deleted {res.rowcount} finished proposals.[/green]")
@@ -733,7 +799,7 @@ class EditorialCLI:
         console.rule("Pending Jobs")
         with SessionLocal() as session:
             if model_class == MergeProposalModel:
-                jobs = session.query(model_class).filter(model_class.status == "pending").limit(20).all()
+                jobs = session.query(model_class).filter(model_class.status == JobStatus.PENDING).limit(20).all()
                 if not jobs:
                     console.print("[yellow]No pending jobs.[/yellow]")
                     Prompt.ask("Press Enter to return")
@@ -769,7 +835,7 @@ class EditorialCLI:
             table.add_column("Created")
             
             for job in jobs:
-                entity_title = "Unknown"
+                entity_title = None
                 if model_class == ArticlesQueueModel and job.article:
                     entity_title = job.article.title[:50]
                 elif model_class == EventsQueueModel and job.event:
@@ -781,11 +847,8 @@ class EditorialCLI:
             console.print(table)
             Prompt.ask("Press Enter to return")
 
-    # --- PUBLISHING REVIEW ---
-
     def publishing_review(self):
         with SessionLocal() as session:
-            # Fetch jobs from Publisher Queue
             stmt = (
                 select(EventsQueueModel)
                 .options(joinedload(EventsQueueModel.event).joinedload(NewsEventModel.articles))
@@ -813,21 +876,16 @@ class EditorialCLI:
             console.clear()
             console.rule(f"🚀 Publishing Review {idx}/{total}")
             
-            # Display Event
             console.print(f"[bold size=16]{event.title}[/bold size=16]")
             console.print(f"ID: {event.id} | Articles: {event.article_count}")
             
-            # Summary
             if event.summary and isinstance(event.summary, dict):
-                # Prefer center/neutral summary
                 summary_text = event.summary.get("center") or event.summary.get("bias") or str(event.summary)
                 console.print(Panel(Markdown(summary_text), title="Generated Briefing", border_style="blue"))
             
-            # Stance/Stats
             if event.stance_distribution:
                 console.print(f"[yellow]Stance Dist:[/yellow] {event.stance_distribution}")
             
-            # Menu
             console.print("\n[bold green]p[/bold green] : Publish (Live)")
             console.print("[bold red]a[/bold red] : Archive (Reject)")
             console.print("[bold yellow]e[/bold yellow] : Edit Title")
@@ -853,7 +911,7 @@ class EditorialCLI:
                     e = session.get(NewsEventModel, event.id)
                     e.title = new_title
                     session.commit()
-                    event.title = new_title # Update local object for display
+                    event.title = new_title 
 
     def _execute_publish_action(self, job_id, event_id, new_status):
         with SessionLocal() as session:
@@ -866,8 +924,6 @@ class EditorialCLI:
                 session.commit()
                 console.print(f"[green]✅ Set to {new_status.value}![/green]")
                 time.sleep(1)
-
-    # --- TOOLS ---
 
     def inspect_tool(self):
         event_id_str = Prompt.ask("Enter Event UUID (or partial title search)")
@@ -954,10 +1010,6 @@ class EditorialCLI:
                     self._read_article_content(sorted_articles[int(choice) - 1])
 
     def _read_article_content(self, article):
-        """
-        Safely reads article content by opening a new session and re-fetching.
-        This handles both detached and attached objects.
-        """
         console.clear()
         console.rule(f"Reading: {article.title}")
         
@@ -969,15 +1021,12 @@ class EditorialCLI:
         )
         print() 
 
-        # FIX: Fetch fresh content using a dedicated session
         content_text = "No content found."
         with SessionLocal() as session:
-            # Re-fetch article to load lazy relationships
             fresh_article = session.get(ArticleModel, article.id)
             if fresh_article and fresh_article.contents:
                 content_text = fresh_article.contents[0].content
             
-            # Print logic inside the session to ensure access
             if fresh_article and fresh_article.summary:
                 console.print(Panel(fresh_article.summary, title="Summary"))
             
