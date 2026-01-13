@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Harvester",
+            "type": "python",
+            "request": "launch",
+            "program": "services/editorial/**/*.py",
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/services/editorial/.env"  // <--- Add this
+        }
+    ]
+}
