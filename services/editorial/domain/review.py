@@ -57,10 +57,21 @@ class NewsReviewerDomain:
             if match_found: break # Stop if we already merged
 
             batch = proposals_data[i:i + BATCH_SIZE]
+            filtered_batch = []
+
+            for prop_data in batch:
+                # COST SAVING CHECK (Entity Gatekeeper)
+                target_event = prop_data['target_obj']
+                if not self._passes_heuristic_check(source_data, target_event):
+                    self._update_proposal_status(session, prop_data['proposal_id'], JobStatus.REJECTED, "Auto-Reject: No Entity Overlap")
+                    continue
+                filtered_batch.append(prop_data)
             
+            if not filtered_batch: continue
+
             candidates_payload = [
                 {'id': str(p['proposal_id']), 'text': p['event_context']} 
-                for p in batch
+                for p in filtered_batch
             ]
             
             try:
@@ -75,7 +86,7 @@ class NewsReviewerDomain:
             # 3. Process Decisions
             results_map = {res.proposal_id: res for res in llm_results}
 
-            for prop_data in batch:
+            for prop_data in filtered_batch:
                 pid = str(prop_data['proposal_id'])
                 if pid not in results_map:
                     self._update_proposal_status(session, pid, JobStatus.FAILED, "LLM Missed Item")
@@ -140,25 +151,27 @@ class NewsReviewerDomain:
 
         # Build Data
         source_ctx = self._build_article_context(session, article)
-        source_vector = article.embedding
-        source_ents = set(article.entities or [])
+        
+        source_data = {
+            'id': article.id, 
+            'title': article.title, 
+            'context_str': source_ctx,
+            'entities': article.entities,
+            'vector': article.embedding
+        }
 
         proposals_data = []
         for p in proposals:
             if not p.target_event: continue
 
-            # CHEAP GATEKEEPER: Entity Overlap Heuristic
-            if not self._passes_heuristic_check(source_ents, p.target_event, p.distance_score):
-                self._update_proposal_status(session, p.id, JobStatus.REJECTED, "Auto-Reject: No Entity Overlap")
-                continue
-
             proposals_data.append({
                 'proposal_id': p.id,
                 'target_id': p.target_event_id,
-                'event_context': self._build_event_context(session, p.target_event, source_vector)
+                'event_context': self._build_event_context(session, p.target_event, article.embedding),
+                'target_obj': p.target_event
             })
             
-        return {'id': article.id, 'title': article.title, 'context_str': source_ctx}, proposals_data
+        return source_data, proposals_data
 
     def _get_event_merge_data(self, session, source_id, proposal_ids):
         source = session.get(NewsEventModel, source_id)
@@ -176,25 +189,27 @@ class NewsReviewerDomain:
         
         # Treat Source Event as the "Text"
         source_ctx = self._build_event_context(session, source) # No vector needed for source context itself
-        source_vector = source.embedding_centroid
-        source_ents = self._extract_event_entities(source)
+        
+        source_data = {
+            'id': source.id, 
+            'title': source.title, 
+            'context_str': source_ctx,
+            'entities': list(self._extract_event_entities(source)),
+            'vector': source.embedding_centroid
+        }
 
         proposals_data = []
         for p in proposals:
             if not p.target_event: continue
 
-            # CHEAP GATEKEEPER: Entity Overlap Heuristic
-            if not self._passes_heuristic_check(source_ents, p.target_event, p.distance_score):
-                self._update_proposal_status(session, p.id, JobStatus.REJECTED, "Auto-Reject: No Entity Overlap")
-                continue
-
             proposals_data.append({
                 'proposal_id': p.id,
                 'target_id': p.target_event_id,
-                'event_context': self._build_event_context(session, p.target_event, source_vector)
+                'event_context': self._build_event_context(session, p.target_event, source.embedding_centroid),
+                'target_obj': p.target_event
             })
 
-        return {'id': source.id, 'title': source.title, 'context_str': source_ctx}, proposals_data
+        return source_data, proposals_data
 
     # --- EXECUTION ---
 
@@ -284,11 +299,17 @@ class NewsReviewerDomain:
         # SMART RETRIEVAL: Use vector relevance if available
         if source_vector is not None:
             stmt = (
-                select(ArticleModel)
+                select(ArticleModel, ArticleContentModel.content)
+                .join(ArticleContentModel, ArticleModel.id == ArticleContentModel.article_id)
                 .where(ArticleModel.event_id == event.id)
                 .order_by(ArticleModel.embedding.cosine_distance(source_vector))
                 .limit(3)
             )
+            arts = session.execute(stmt).all() # returns [(Article, Content), ...]
+            
+            text += "RELEVANT CONTEXT:\n"
+            for art, content in arts:
+                text += f"- [{art.published_date}] {art.title} : {content[:200]}...\n"
         else:
             # Fallback to date if no vector available
             stmt = (
@@ -297,15 +318,14 @@ class NewsReviewerDomain:
                 .order_by(desc(ArticleModel.published_date))
                 .limit(3)
             )
-            
-        arts = session.execute(stmt).scalars().all()
-        
-        text += "RELATED ARTICLES:\n"
-        for art in arts:
-            content = "..."
-            rec = session.scalar(select(ArticleContentModel.content).where(ArticleContentModel.article_id == art.id))
-            if rec: content = rec[:200]
-            text += f"- [{art.published_date}] {art.title} : {content}...\n"
+            arts = session.execute(stmt).scalars().all()
+            text += "RELATED ARTICLES (By Date):\n"
+            for art in arts:
+                content = "..."
+                rec = session.scalar(select(ArticleContentModel.content).where(ArticleContentModel.article_id == art.id))
+                if rec: content = rec[:200]
+                text += f"- [{art.published_date}] {art.title} : {content}...\n"
+                
         return text
 
     def _extract_event_entities(self, event) -> set:
@@ -317,23 +337,17 @@ class NewsReviewerDomain:
             ents.update(items.keys())
         return ents
 
-    def _passes_heuristic_check(self, source_ents: set, target_event: NewsEventModel, distance: float) -> bool:
+    def _passes_heuristic_check(self, source_data, target_event: NewsEventModel) -> bool:
         """
-        Returns True if the proposal is worth checking with AI.
-        Returns False if we should auto-reject it to save money.
+        Auto-reject if there is ZERO overlap in Named Entities.
         """
+        source_ents = set(source_data.get('entities', []))
         target_ents = self._extract_event_entities(target_event)
         
         if not source_ents or not target_ents:
             return True # Cannot judge, let AI decide
             
         overlap = source_ents.intersection(target_ents)
-        
         if len(overlap) == 0:
-            # EDGE CASE: If distance is VERY close (e.g. < 0.10), trust the vector 
-            # (maybe synonyms were used). But if it's "loose" (e.g. 0.15), reject.
-            if distance < 0.10:
-                return True
             return False
-            
         return True
