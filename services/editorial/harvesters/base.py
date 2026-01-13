@@ -40,7 +40,7 @@ class BaseHarvester:
             "Upgrade-Insecure-Requests": "1",
         }
 
-    async def harvest(self, session, sources: List[dict], ignore_hashes: set = None) -> list[dict]:
+    async def harvest(self, session, sources: List[dict], ignore_hashes: set = set()) -> list[dict]:
         """
         Orchestrator: Iterates sources, fetches data, and handles deduplication/merging.
         DO NOT OVERRIDE THIS in subclasses unless you want to change deduplication logic.
@@ -65,7 +65,7 @@ class BaseHarvester:
 
         return list(unique_articles.values())
 
-    async def fetch_feed_articles(self, session, source: dict, ignore_hashes: set = None) -> List[dict]:
+    async def fetch_feed_articles(self, session, source: dict, ignore_hashes: set = set()) -> List[dict]:
         """
         Strategy Implementation: Fetches articles based on feed type.
         Subclasses should override THIS to add custom logic (e.g. Sitemap Index by Date).
@@ -541,7 +541,7 @@ class BaseHarvester:
 
         return await self._fetch(session, best_url, blocklist, allowed_sections, ignore_hashes)
 
-    async def _fetch_text_browser(self, url: str) -> Optional[bytes]:
+    async def _fetch_text_browser(self, url: str) -> Optional[bytes|str]:
         """Fallback: Fetch raw content using Playwright."""
         return await BrowserFetcher.fetch(url, return_bytes=True)
 
