@@ -277,6 +277,7 @@ class NewsCluster:
         diff_date: timedelta = timedelta(days=5),
         limit: int = 10,
         rrf_k: int = 60,
+        decay_rate: float = 0.05,
     ):
         # 1. Semantic Search CTE
         semantic_subq = (
@@ -343,9 +344,16 @@ class NewsCluster:
         sem_alias = aliased(semantic_subq, name="sem")
         kw_alias = aliased(keyword_subq, name="kw")
 
-        score_expression = func.coalesce(
-            1.0 / (rrf_k + sem_alias.c.rank), 0.0
-        ) + func.coalesce(1.0 / (rrf_k + kw_alias.c.rank), 0.0)
+        # Time Decay: Penalize events far from target_date
+        # hours_diff = abs(target_date - last_updated_at) in hours
+        date_ref = func.coalesce(NewsEventModel.last_updated_at, NewsEventModel.created_at)
+        hours_diff = func.abs(func.extract('epoch', target_date - date_ref)) / 3600.0
+        decay_factor = 1.0 / (1.0 + (decay_rate * hours_diff))
+
+        score_expression = (
+            func.coalesce(1.0 / (rrf_k + sem_alias.c.rank), 0.0) + 
+            func.coalesce(1.0 / (rrf_k + kw_alias.c.rank), 0.0)
+        ) * decay_factor
 
         distance_expression = func.coalesce(sem_alias.c.dist, 1.0)
 
@@ -396,8 +404,10 @@ class NewsCluster:
         if vector is None or len(vector) == 0:
             return ClusterResult("ERROR", None, [], "Missing Vector")
 
+        # Ensure target_date is valid (fallback to now)
+        target_dt = article.published_date or datetime.now(timezone.utc)
         candidates = self.search_news_events_hybrid(
-            session, text_query, vector, article.published_date
+            session, text_query, vector, target_dt
         )
 
         if not candidates:

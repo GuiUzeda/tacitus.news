@@ -17,22 +17,7 @@ The system is designed as a Cyborg Pipeline:
 
 The pipeline moves data through a series of PostgreSQL Queues (articles_queue, events_queue).
 
-```mermaid
-graph TD
-    A[NewsGetter] -->|Raw Articles| B(Filter Queue)
-    B --> C[NewsFilter]
-    C -->|Approved IDs| D(Cluster Queue)
-    D --> E[NewsCluster]
-    E -->|High Confidence| F(Enhancer Queue)
-    E -->|Ambiguous/Proposals| G[NewsReviewer]
-    G -->|Auto-Match| F
-    G -->|Still Ambiguous| H[CLI: Review Merges]
-    H -->|Manual Resolve| F
-    L[NewsMerger] -->|Event Proposals| G
-    F --> I[NewsEnhancer]
-    I -->|Draft Event| J[CLI: Publisher]
-    J -->|Publish| K[Front End DB]
-```
+
 
 ## 🔁 Part 1: The Automated Loop (Cron Jobs)
 
@@ -59,18 +44,18 @@ These scripts are designed to run continuously or periodically to build up the b
 * **Logic:**
     * **Match:** Merges into existing event immediately.
     * **New:** Creates a new event.
-    * **Updates:** Aggregates `editorial_score`, `best_source_rank`, and Interest counts.
+    * **Updates:** Aggregates `editorial_score`, `best_source_rank`, and Interest counts via `EventAggregator`.
     * **Ambiguous:** Creates a MergeProposal and flags it for review.
 * **Run:** `python news_cluster.py`
 
-### 4. news_reviewer.py (The Auditor)
+### 4. workers/reviewer.py (The Auditor)
 * **Role:** An automated worker that processes pending MergeProposals before they reach the human Editor.
-* **Intelligence:** Uses a "Medium LLM" (Gemma-3-12B-IT) to perform Event Co-reference Resolution. It compares the candidate article against the target event to determine if they refer to the exact same real-world incident.
+* **Intelligence:** Uses a "Medium LLM" (via `CloudNewsAnalyzer`) to perform Event Co-reference Resolution. It compares the candidate article (or source event) against the target event to determine if they refer to the exact same real-world incident.
 * **Logic:**
-    * **High Confidence Match:** Auto-merges the article.
+    * **High Confidence Match:** Auto-merges the article or event.
     * **High Confidence Mismatch:** Auto-rejects the proposal (triggers "New Event").
     * **Unsure:** Leaves the proposal for human review in the CLI.
-* **Run:** `python news_reviewer.py`
+* **Run:** `python workers/reviewer.py`
 
 ### 5. news_merger.py (The Deduplicator)
 * **Role:** Scans active events to find "Split Brain" duplicates (events that should be merged but were separated).
@@ -80,11 +65,19 @@ These scripts are designed to run continuously or periodically to build up the b
     * **Proposal:** Distance < 0.15 (or < 0.23 with strong keyword match). Creates an `event_merge` proposal.
 * **Run:** `python news_merger.py`
 
+### 6. scripts/backfill_interests.py (The Entity Fixer)
+* **Role:** A utility script to re-process existing articles and events to extract or update Named Entities (Interests) using SpaCy.
+* **Intelligence:** Uses `pt_core_news_lg` to extract Person, Place, Org, and Topic entities.
+* **Logic:**
+    * **Phase 1:** Iterates through Events, re-analyzing linked articles and re-aggregating interest counts.
+    * **Phase 2:** Scans orphan articles (not in events) to ensure they have searchable entities.
+* **Run:** `python scripts/backfill_interests.py`
+
 ## 🕹️ Part 2: The Human Loop (CLI)
 
 These steps involve high-level analysis or human finalization.
 
-### 6. workers/enhancer.py (The Analyst)
+### 7. workers/enhancer.py (The Analyst)
 * **Role:** Reads from ENHANCER queue. Aggregates intelligence and prepares the event for publication.
 * **Intelligence:**
     * **Batch Processing:** Analyzes new articles in batches to extract Entities, Stance, and Clickbait scores.
@@ -93,7 +86,7 @@ These steps involve high-level analysis or human finalization.
     * **Flow:** Moves completed events to the `PUBLISHER` queue.
 * **Run:** `python workers/enhancer.py`
 
-### 7. cli.py (The Control Room)
+### 8. cli.py (The Control Room)
 The central dashboard for the Editor.
 * **[1] Review Merges:** Resolves "Ambiguous Clusters" (Article-Event or Event-Event).
 * **[2] Queue Manager:** Retry failed jobs, reset stuck processing, or inspect pipeline health.

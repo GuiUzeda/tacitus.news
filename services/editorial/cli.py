@@ -72,9 +72,10 @@ class EditorialCLI:
             console.print(f"[4] 📖 Inspect Event/Article (ID Search)")
             console.print(f"[5] 🔗 Find & Merge Duplicate Events (Total: {active_events})")
             console.print(f"[6] 🚀 Publishing Review ({ready_to_publish} ready)")
+            console.print(f"[7] 📰 View Main Page (Live Feed)")
             console.print(f"[q] Quit")
 
-            choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "6", "q"])
+            choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "6", "7", "q"])
 
             if choice == "1":
                 self.review_merges()
@@ -88,6 +89,8 @@ class EditorialCLI:
                 self.merge_duplicate_events()
             elif choice == "6":
                 self.publishing_review()
+            elif choice == "7":
+                self.view_main_page()
             elif choice == "q":
                 console.print("Bye! 👋")
                 sys.exit(0)
@@ -927,6 +930,54 @@ class EditorialCLI:
                 session.commit()
                 console.print(f"[green]✅ Set to {new_status.value}![/green]")
                 time.sleep(1)
+
+    def view_main_page(self):
+        console.clear()
+        console.rule("📰 Live Main Page (Simulation)")
+        
+        with SessionLocal() as session:
+            stmt = (
+                select(NewsEventModel)
+                .where(
+                    NewsEventModel.status == EventStatus.PUBLISHED,
+                    NewsEventModel.is_active == True
+                )
+                .order_by(desc(NewsEventModel.hot_score))
+                .limit(50)
+            )
+            events = session.execute(stmt).scalars().all()
+            
+            if not events:
+                console.print("[yellow]No published events found.[/yellow]")
+                Prompt.ask("Press Enter to return")
+                return
+
+            table = Table(show_header=True, header_style="bold blue", title="Top Stories (Live)")
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Score", justify="right", width=6)
+            table.add_column("Title", ratio=2)
+            table.add_column("Bias (L/C/R)", justify="center")
+            table.add_column("Tags", style="italic magenta")
+            table.add_column("Publish Date", justify="center")
+
+            for i, event in enumerate(events):
+                # Calculate Bias Counts
+                l, c, r = 0, 0, 0
+                if hasattr(event, 'article_counts_by_bias') and event.article_counts_by_bias:
+                    counts = event.article_counts_by_bias
+                    l, c, r = counts.get('left', 0), counts.get('center', 0), counts.get('right', 0)
+                elif event.bias_distribution:
+                    l = len(event.bias_distribution.get('left', []))
+                    c = len(event.bias_distribution.get('center', []))
+                    r = len(event.bias_distribution.get('right', []))
+
+                bias_str = f"[blue]{l}[/blue] / [white]{c}[/white] / [red]{r}[/red]"
+                tags = event.summary.get("insights", []) if (event.summary and isinstance(event.summary, dict)) else []
+                
+                table.add_row(str(i + 1), f"{event.hot_score or 0:.1f}", event.title, bias_str, ", ".join(tags), event.created_at.strftime("%Y-%m-%d"))
+            
+            console.print(table)
+            Prompt.ask("Press Enter to return")
 
     def inspect_tool(self):
         event_id_str = Prompt.ask("Enter Event UUID (or partial title search)")
