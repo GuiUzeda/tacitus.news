@@ -137,7 +137,7 @@ class CloudNewsFilter:
         - **Economy:** Markets, Companies (i.e. Petrobras, Vale, Banks), Inflation, Taxes, Agribusiness, Real Estate.
         - **Society:** Health, Education, Environment/Climate, Transport, Infrastructure.
         - **Tech/Science:** ONLY if it involves Regulation, AI Policy, or huge investments.
-        - **International:** Related to Brazil, G20, BRICS, Latin America, or Major Global Conflicts (Wars), United States.
+        - **International:** Relevant International news
         - **Security and crimes:** Public Security, Crimes
         
         **EXCLUDE (Strict Blocklist):**
@@ -145,7 +145,7 @@ class CloudNewsFilter:
         - Celebrity Gossip / Novelas / Reality Shows (BBB).
         - Horoscopes / Recipes / lifestyle tips.
         - Product Reviews (e.g., "Review of iPhone 16"), including cars
-        - Weather / Forecast - Unless it is a natural disaster.    
+        - Weather / Forecast 
         - Lotery results.    
         
         Input Headlines:

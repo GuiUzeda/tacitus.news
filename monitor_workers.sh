@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 WORKERS=(
   "worker-harvester"
   "worker-filter"
+  "worker-enricher"
   "worker-cluster"
   "worker-merger"
   "worker-reviewer"

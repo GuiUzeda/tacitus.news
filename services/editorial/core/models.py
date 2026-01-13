@@ -23,6 +23,7 @@ class ClusterResult:
 
 class ArticlesQueueName(enum.Enum):
     FILTER = "filter"
+    ENRICH = "enrich"
     CLUSTER = "cluster"
 
 

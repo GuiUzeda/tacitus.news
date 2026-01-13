@@ -37,8 +37,9 @@ tmux split-window -v -l '50%' "$(get_cmd worker-reviewer)"
 # 3. Fill Row 1 (Top)
 # Go back to Top-Left
 tmux select-pane -t 0
-# Split remaining space to the right to create 4 equal columns
-tmux split-window -h -l '75%' "$(get_cmd worker-filter)"
+# Split remaining space to the right to create 5 equal columns
+tmux split-window -h -l '80%' "$(get_cmd worker-filter)"
+tmux split-window -h -l '75%' "$(get_cmd worker-enricher)"
 tmux split-window -h -l '66%' "$(get_cmd worker-cluster)"
 tmux split-window -h -l '50%' "$(get_cmd worker-merger)"
 

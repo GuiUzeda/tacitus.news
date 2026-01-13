@@ -11,11 +11,19 @@
         "url": "https://uol.com.br",
         "feed_type": "html",
         "is_ranked": true,
-        "url_pattern": "https://.*/\\d{4}/\\d{2}/\\d{2}/.*\\.htm"
+        "url_pattern": "https://.*/\\d{4}/\\d{2}/\\d{2}/.*\\.htm",
+        "use_browser_render": true,
+        "scroll_depth": 4
       },
       {
         "url": "https://noticias.uol.com.br/sitemap/v2/news-01.xml",
-        "feed_type": "sitemap"
+        "feed_type": "sitemap",
+        "use_browser_render": true,
+        "scroll_depth": 0
+      },
+      {
+        "url": "https://rss.uol.com.br/feed/noticias.xml",
+        "feed_type": "rss"
       }
     ]
   },

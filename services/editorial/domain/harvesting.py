@@ -1,225 +1,43 @@
 import asyncio
 import hashlib
-import json
+from os import wait
 import re
 from datetime import datetime, timezone
-from functools import partial
-from typing import List, Optional, Dict, Any, Set
-from uuid import UUID
-from concurrent.futures import ProcessPoolExecutor
+from typing import List, Dict, Any, AsyncGenerator
 
 import aiohttp
-import trafilatura
 from loguru import logger
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 
 # Project Imports
-from core.nlp_service import NLPService
 from harvesters.base import BaseHarvester
 from news_events_lib.models import (
     ArticleContentModel,
     ArticleModel,
     JobStatus,
-    NewspaperModel,
-    FeedModel
 )
 from core.models import ArticlesQueueModel, ArticlesQueueName
 from harvesters.factory import HarvesterFactory
 from config import Settings
 
-# --- MULTIPROCESSING HELPERS ---
-
-_worker_nlp_service = None
-
-def init_worker():
-    """
-    Called once when the worker process starts. 
-    Loads the AI models into the process's global memory.
-    """
-    global _worker_nlp_service
-    try:
-        _worker_nlp_service = NLPService()
-    except Exception as e:
-        logger.error(f"Worker init failed: {e}")
-
-def _process_entry_cpu_task(html: str, entry: dict, newspaper_id: UUID) -> Optional[dict]:
-    """
-    CPU-intensive task: Extract Content -> Clean -> Embed -> Extract Interests.
-    """
-    global _worker_nlp_service
-    try:
-        if _worker_nlp_service is None:
-            _worker_nlp_service = NLPService()
-
-        # 1. Extract Body Text
-        extracted_json = trafilatura.extract(
-            html, with_metadata=True, output_format="json", include_comments=False
-        )
-        
-        if not extracted_json: return None
-        data = json.loads(extracted_json)
-        raw_text = data.get("raw_text", "")
-        
-        # Filter very short content
-        if len(raw_text) < 100: return None 
-
-        # 2. NLP Processing
-        clean_text = _worker_nlp_service.clean_text_for_embedding(raw_text)
-        embedding = _worker_nlp_service.calculate_vector(clean_text)
-        
-        extraction_text = f"{data.get('title', '')} {data.get('excerpt', '')} {clean_text[:2000]}"
-        interests = _worker_nlp_service.extract_interests(extraction_text)
-        
-        # 3. Entity & Tag extraction
-        tags = [t.strip() for t in data.get("tags", "").split(",") if t.strip()]
-        flat_interests = [item for sublist in interests.values() for item in sublist]
-        all_entities = list(set(tags + flat_interests))[:15]
-
-        clean_link = entry["link"]
-        link_hash = entry.get("hash")
-        if not link_hash:
-            link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
-            
-        return {
-            "title": data.get("title") or entry.get("title"),
-            "link": clean_link,
-            "hash": link_hash,
-            "published": entry.get("published") or data.get("date"),
-            "summary": data.get("excerpt"),
-            "content": raw_text,
-            "newspaper_id": newspaper_id,
-            "entities": all_entities,
-            "interests": interests,
-            "embedding": embedding,
-            # Pass the Rank through
-            "rank": entry.get("rank") 
-        }
-    except Exception as e:
-        print(f"CPU Task Error: {e}")
-        return None
-
 # --- DOMAIN CLASS ---
 
-class HarvestingDomain:
-    USER_AGENTS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    ]
 
-    def __init__(self, max_cpu_workers=3):
+class HarvestingDomain:
+
+    def __init__(self):
         self.settings = Settings()
-        self.max_cpu_workers = max_cpu_workers
-        
-        # Initialize Executor for CPU tasks
-        self.cpu_executor = ProcessPoolExecutor(
-            max_workers=max_cpu_workers, 
-            initializer=init_worker
-        )
-        self.base_headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://www.google.com/",
-            "Upgrade-Insecure-Requests": "1",
-        }
+
         self.factory = HarvesterFactory()
 
-    def shutdown(self):
-        self.cpu_executor.shutdown(wait=True)
-
-    def warmup(self):
-        """
-        Forces the creation of worker processes and loading of models.
-        """
-        logger.info(f"🔥 Warming up {self.max_cpu_workers} CPU workers (loading AI models)...")
-        # Submit dummy tasks to force worker initialization
-        futures = [self.cpu_executor.submit(pow, 1, 1) for _ in range(self.max_cpu_workers)]
-        for f in futures:
-            f.result()
-        logger.success("✅ CPU workers ready.")
-
-    def sync_newspapers(self, session: Session):
-        """
-        Syncs the database with the feeds.json file.
-        """
-        import json
-        import os
-        
-        # Resolve path
-        feeds_path = self.settings.feeds_path
-        if not os.path.exists(feeds_path):
-             # Fallback for relative path from domain dir
-             feeds_path = os.path.join(os.path.dirname(__file__), "../data/feeds.json")
-        
-        if not os.path.exists(feeds_path):
-            logger.error(f"feeds.json not found at {feeds_path}")
-            return
-
-        try:
-            with open(feeds_path, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"Error reading feeds.json: {e}")
-            return
-
-        logger.info(f"🔄 Syncing {len(data)} newspapers from config...")
-        
-        for np_data in data:
-            # 1. Upsert Newspaper
-            stmt = select(NewspaperModel).where(NewspaperModel.name == np_data["name"])
-            newspaper = session.execute(stmt).scalar_one_or_none()
-            
-            if not newspaper:
-                newspaper = NewspaperModel(
-                    name=np_data["name"],
-                    bias=np_data.get("bias"),
-                    ownership_type=np_data.get("ownership_type", ""),
-                    icon_url=np_data.get("icon_url"),
-                    logo_url=np_data.get("logo_url"),
-                    description=np_data.get("description", ""),
-                )
-                session.add(newspaper)
-                session.flush()
-            else:
-                newspaper.bias = np_data.get("bias")
-                newspaper.ownership_type = np_data.get("ownership_type", "")
-            
-            # 2. Upsert Feeds
-            for feed_data in np_data.get("feeds", []):
-                feed_url = feed_data["url"]
-                
-                stmt_feed = select(FeedModel).where(FeedModel.url == feed_url)
-                feed = session.execute(stmt_feed).scalar_one_or_none()
-                
-                if not feed:
-                    feed = FeedModel(
-                        newspaper_id=newspaper.id,
-                        url=feed_url,
-                        feed_type=feed_data.get("feed_type", "sitemap"),
-                        is_active=True
-                    )
-                    session.add(feed)
-                
-                # Update Configs
-                feed.feed_type = feed_data.get("feed_type", "sitemap")
-                feed.url_pattern = feed_data.get("url_pattern")
-                feed.blocklist = feed_data.get("blocklist")
-                feed.allowed_sections = feed_data.get("allowed_sections")
-                feed.is_ranked = feed_data.get("is_ranked", False)
-                feed.use_browser_render = feed_data.get("use_browser_render", False)
-                feed.scroll_depth = feed_data.get("scroll_depth", 1)
-                
-        session.commit()
-
     async def process_newspaper(
-        self, 
-        session: Session, 
-        http_session: aiohttp.ClientSession, 
-        newspaper_data: dict
+        self,
+        session: Session,
+        http_session: aiohttp.ClientSession,
+        newspaper_data: dict,
     ):
         """
         Orchestrates the pipeline for a SINGLE newspaper.
@@ -228,7 +46,7 @@ class HarvestingDomain:
             name = newspaper_data["name"]
             # UPDATED: Pass the full feed objects (with patterns/flags)
             raw_feeds = newspaper_data["feeds"]
-            
+
             # Validate Regex Patterns to prevent crashes in Harvester Base
             feeds = []
             for feed in raw_feeds:
@@ -238,45 +56,35 @@ class HarvestingDomain:
                         re.compile(pattern)
                         feeds.append(feed)
                     except re.error as e:
-                        logger.error(f"[{name}] Skipping Feed {feed.get('url')} due to Invalid Regex: {e}")
+                        logger.error(
+                            f"[{name}] Skipping Feed {feed.get('url')} due to Invalid Regex: {e}"
+                        )
                 else:
                     feeds.append(feed)
 
-            feed_list = ", ".join([f.get('url') for f in feeds])
+            feed_list = ", ".join([f.get("url") for f in feeds])
             logger.info(f"[{name}] 🚀 Harvesting {len(feeds)} feeds: {feed_list}")
 
             harvester_instance = self.factory.get_harvester(name)
             # 1. Pipeline Execution
             total_saved = 0
-            batch = []
-            
-            # Consume the generator as results arrive
-            async for article_data in self._run_pipeline(
-                http_session, 
-                feeds, 
+            all_articles = await self._run_pipeline(
+                http_session,
+                feeds,
                 harvester_instance,
-                name, 
-                newspaper_data["id"], 
-                newspaper_data["article_hashes"]
-            ):
-                batch.append(article_data)
-                
-                # Save immediately to yield results as soon as possible
-                if len(batch) >= 5:
-                    saved_objs = self._bulk_save_articles(session, batch)
-                    if saved_objs:
-                        self._queue_articles_bulk(session, saved_objs)
-                        session.commit() # Commit immediately
-                        total_saved += len(saved_objs)
-                    batch = []
-            
-            # Save remaining
-            if batch:
-                saved_objs = self._bulk_save_articles(session, batch)
+                name,
+                newspaper_data["id"],
+                newspaper_data["article_hashes"],
+            )
+
+            logger.info(f"[{name}] Extracted {len(all_articles)} items from feeds.")
+
+            if all_articles:
+                saved_objs = self._bulk_save_articles(session, all_articles)
                 if saved_objs:
                     self._queue_articles_bulk(session, saved_objs)
                     session.commit()
-                    total_saved += len(saved_objs)
+                    total_saved = len(saved_objs)
 
             return total_saved
 
@@ -286,91 +94,111 @@ class HarvestingDomain:
 
     # --- INTERNAL PIPELINE STEPS ---
 
-    async def _run_pipeline(self, http_session, feeds, harvester, name, np_id, ignore_hashes):
+    async def _run_pipeline(
+        self, http_session, feeds, harvester, name, np_id, ignore_hashes
+    ) -> List[Dict[str, Any]]:
         # A. Fetch Links (Uses the new BaseHarvester with Browser/Regex support)
         try:
             # Pass ignore_hashes to filter at source (BaseHarvester)
             raw_entries = await harvester.harvest(http_session, feeds, ignore_hashes)
         except Exception as e:
             logger.error(f"[{name}] Link fetch failed: {e}")
-            return
+            return []
 
-        if not raw_entries: return
+        if not raw_entries:
+            return []
 
-        # B. Fetch Content & Process (Concurrency Limit for IO)
-        loop = asyncio.get_running_loop()
-        io_semaphore = asyncio.Semaphore(15)
-        
-        async def _process_entry(entry):
+        results = []
+        # B. Yield entries for saving (Enrichment happens in a separate worker now)
+        for entry in raw_entries:
             clean_link = entry["link"]
-            # Hash check is now done in BaseHarvester, so we assume entry is new.
-            
-            html = None
-            try:
-                headers = self.base_headers.copy()
-                headers["User-Agent"] = self.USER_AGENTS[0] 
-                timeout = aiohttp.ClientTimeout(total=45)
-                async with http_session.get(clean_link, headers=headers, timeout=timeout) as resp:
-                    if resp.status == 200: html = await resp.text()
-            except: pass
+            link_hash = entry.get("hash")
+            if not link_hash:
+                link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
 
-            if not html: return None
+            results.append({
+                "title": entry.get("title"),
+                "link": clean_link,
+                "hash": link_hash,
+                "published": entry.get("published"),
+                "summary": entry.get("summary"),  # Might be None
+                "content": entry.get(
+                    "content"
+                ),  # Might be "Unknown" or full text from RSS
+                "newspaper_id": np_id,
+                "rank": entry.get("rank"),
+            })
 
-            # Sanitize for pickle
-            safe_entry = self._sanitize_entry(entry)
-
-            # Offload to CPU
-            return await loop.run_in_executor(
-                self.cpu_executor,
-                partial(_process_entry_cpu_task, html, safe_entry, np_id)
-            )
-
-        # Use as_completed to yield results as soon as they are ready
-        tasks = [_process_entry(e) for e in raw_entries]
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            if result:
-                yield result
+        return results
 
     def _sanitize_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         """Ensures entry data is pickle-safe for multiprocessing"""
         clean = entry.copy()
         pub = clean.get("published")
-        if pub and hasattr(pub, "group"): # Fix re.Match objects from Regex
+        if pub and hasattr(pub, "group"):  # Fix re.Match objects from Regex
             clean["published"] = pub.group(0)
         return clean
 
-    def _bulk_save_articles(self, session, articles_data: List[dict]) -> List[ArticleModel]:
+    def _bulk_save_articles(
+        self, session, articles_data: List[dict]
+    ) -> List[ArticleModel]:
+        if not articles_data:
+            return []
+
+        # Pre-fetch existing hashes to filter duplicates
+        hashes = [d["hash"] for d in articles_data if d.get("hash")]
+        existing_hashes = set()
+        if hashes:
+            existing_hashes = set(session.scalars(
+                select(ArticleModel.url_hash).where(ArticleModel.url_hash.in_(hashes))
+            ).all())
+
         valid_models = []
+        skipped_count = 0
         for data in articles_data:
+            h = data.get("hash")
+            if h in existing_hashes:
+                skipped_count += 1
+                continue
+
+            # If content is "Unknown" or empty, we save empty list to be enriched later
+            # If RSS provided content, we save it.
+            contents = []
+            if data.get("content") and data["content"] != "Unknown":
+                contents = [ArticleContentModel(content=data["content"])]
+
             dt = self._parse_date(data.get("published"))
             article = ArticleModel(
-                title=data["title"][:500] if data["title"] else "No Title",
+                title=data["title"][:500] if data["title"] else "Unknown",
                 original_url=data["link"],
                 url_hash=data["hash"],
                 summary=data["summary"],
-                summary_date=dt,
                 published_date=dt,
                 newspaper_id=data["newspaper_id"],
                 authors=[],
-                contents=[ArticleContentModel(content=data["content"])],
-                entities=data["entities"],
-                interests=data.get("interests", {}),
-                embedding=data["embedding"],
+                contents=contents,
+                entities=[],
+                interests={},
+                embedding=None,
                 summary_status=JobStatus.PENDING,
-                
+                summary_date=datetime.now(timezone.utc),
                 # UPDATED: Save the Editorial Rank
-                source_rank=data.get("rank") 
+                source_rank=data.get("rank"),
             )
             valid_models.append(article)
 
-        if not valid_models: return []
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} duplicates (pre-check).")
+
+        if not valid_models:
+            return []
 
         try:
             session.add_all(valid_models)
             session.flush()
             return valid_models
-        except IntegrityError:
+        except IntegrityError as e:
+            logger.warning(f"Bulk save failed (IntegrityError). Retrying one-by-one... {e}")
             session.rollback()
             # Fallback: Save one by one to isolate duplicates
             saved = []
@@ -381,6 +209,7 @@ class HarvestingDomain:
                     saved.append(model)
                 except IntegrityError:
                     session.rollback()
+            logger.info(f"Recovered {len(saved)} articles via fallback.")
             return saved
         except Exception as e:
             logger.error(f"Save Error: {e}")
@@ -388,21 +217,38 @@ class HarvestingDomain:
             return []
 
     def _queue_articles_bulk(self, session, articles: List[ArticleModel]):
-        if not articles: return
-        queue_data = [{
-            "article_id": a.id,
-            "status": JobStatus.PENDING,
-            "queue_name": ArticlesQueueName.FILTER
-        } for a in articles if a.id]
-        
+        if not articles:
+            return
+        now = datetime.now(timezone.utc)
+        queue_data = []
+        for a in articles:
+            if not a.id:
+                continue
+
+            # If title is missing, skip Filter and go straight to Enricher
+            target_queue = ArticlesQueueName.ENRICH if a.title.lower() in [ "no title", "unknown"] else ArticlesQueueName.FILTER
+
+            queue_data.append({
+                "article_id": a.id,
+                "status": JobStatus.PENDING,
+                "queue_name": target_queue,
+                "created_at": now,
+                "updated_at": now,
+                "attempts": 0,
+            })
+
         if queue_data:
-            stmt = insert(ArticlesQueueModel).values(queue_data).on_conflict_do_nothing()
+            stmt = (
+                insert(ArticlesQueueModel).values(queue_data).on_conflict_do_nothing()
+            )
             session.execute(stmt)
 
     def _parse_date(self, pub_data):
-        if not pub_data: return datetime.now(timezone.utc)
+        if not pub_data:
+            return datetime.now(timezone.utc)
         try:
             if isinstance(pub_data, str):
-                return datetime.fromisoformat(pub_data.replace('Z', '+00:00'))
+                return datetime.fromisoformat(pub_data.replace("Z", "+00:00"))
             return pub_data
-        except: return datetime.now(timezone.utc)
+        except:
+            return datetime.now(timezone.utc)

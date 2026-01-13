@@ -72,9 +72,9 @@ class NewsFilterDomain:
 
         for idx, job in enumerate(valid_jobs):
             if idx in approved_indices:
-                # RULE: Approved -> Move to CLUSTER queue
+                # RULE: Approved -> Move to ENRICH queue
                 job.status = JobStatus.PENDING
-                job.queue_name = ArticlesQueueName.CLUSTER
+                job.queue_name = ArticlesQueueName.ENRICH
                 job.msg = None  # Clear any previous errors
                 job.updated_at = datetime.now(timezone.utc)
                 approved_count += 1

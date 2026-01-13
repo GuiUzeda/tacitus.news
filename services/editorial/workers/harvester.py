@@ -30,22 +30,15 @@ class HarvesterWorker:
         )
         
         # Instantiate Domain (manages ProcessPool)
-        self.domain = HarvestingDomain(max_cpu_workers=1)
+        self.domain = HarvestingDomain()
         self.worker_id = str(uuid.uuid4())[:8]
         
     async def run(self):
         logger.info(f"🌾 Harvester Worker Started. ID: {self.worker_id}")
         
-        # Warmup CPU workers (Load AI Models) before taking any jobs
-        await asyncio.to_thread(self.domain.warmup)
-        
         while True:
             cycle_start_time = datetime.now()
             try:
-                # 0. Sync Configuration (Feeds)
-                with self.SessionLocal() as session:
-                    self.domain.sync_newspapers(session)
-
                 # 1. Fetch Configuration (IO Bound)
                 newspapers = self._get_active_newspapers()
                 if not newspapers:
@@ -152,4 +145,3 @@ if __name__ == "__main__":
         asyncio.run(worker.run())
     except KeyboardInterrupt:
         logger.info("Stopping...")
-        worker.domain.shutdown()

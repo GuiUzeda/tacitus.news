@@ -381,6 +381,15 @@ class NewsCluster:
     def cluster_existing_article(
         self, session: Session, article: ArticleModel
     ) -> ClusterResult:
+        # 0. Age Check: Ignore articles older than 7 days
+        if article.published_date:
+            pub_date = article.published_date
+            if pub_date.tzinfo is None:
+                pub_date = pub_date.replace(tzinfo=timezone.utc)
+            
+            if pub_date < datetime.now(timezone.utc) - timedelta(days=7):
+                return ClusterResult("IGNORED", None, [], "Article too old (> 7 days)")
+
         text_query = self.derive_search_query(article)
         vector = article.embedding
 

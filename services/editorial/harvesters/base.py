@@ -5,6 +5,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from urllib.parse import urlparse, urljoin
+from email.utils import parsedate_to_datetime
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -15,12 +16,13 @@ from playwright.async_api import async_playwright
 class BaseHarvester:
     def __init__(
         self,
-        cutoff: timedelta = timedelta(hours=24),
+        cutoff: timedelta = timedelta(hours=100),
     ):
         # Universal Garbage Filter (Applied to all links by default)
         self.blocklist: str = (
             r"(login|search|tag|gallery|/esporte/|futebol|bbb|horoscopo|gastronomia|"
-            r"patrocinado|publicidade|quiz|ilustrada|podcast|web-stories|/live/)"
+            r"patrocinado|publicidade|quiz|ilustrada|podcast|web-stories|/live/|"
+            r"\.(jpg|jpeg|png|gif|bmp|webp|svg|mp4|avi|mov|wmv|flv|mp3|wav|pdf|doc|docx|xls|xlsx|zip|rar|7z|exe|apk)(\?.*)?$)"
         )
         # Only accept news from the last 24h (Crucial for Indexes)
         self.cutoff_date = datetime.now(timezone.utc) - cutoff
@@ -119,12 +121,14 @@ class BaseHarvester:
 
         # 3. Standard Sitemap
         elif feed_type == "sitemap":
+                
             return await self._fetch(
                 session,
                 url,
                 blocklist=source.get("blocklist"),
                 allowed_sections=source.get("allowed_sections"),
                 ignore_hashes=ignore_hashes,
+                use_browser=use_browser
             )
         
         # 4. Built-in Dynamic Sitemaps (New!)
@@ -188,6 +192,13 @@ class BaseHarvester:
                 if response.status != 200:
                     logger.error(f"Response Error {url}: {response.status}")
                     return []
+                
+                # Check Content-Type to avoid binary files
+                ctype = response.headers.get("Content-Type", "").lower()
+                if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
+                     logger.warning(f"Skipping non-HTML seed {url}: {ctype}")
+                     return []
+
                 html_content = await response.read()
         except Exception as e:
             logger.warning(f"HTML fetch fail {url}: {e}")
@@ -242,6 +253,12 @@ class BaseHarvester:
                             viewport={"width": 1280, "height": 800}
                         )
                         page = await context.new_page()
+
+                        # Block heavy resources to speed up loading and save bandwidth
+                        await page.route("**/*", lambda route: route.abort() 
+                            if route.request.resource_type in ["image", "media", "font"] 
+                            else route.continue_()
+                        )
 
                         # 1. Load Page
                         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
@@ -343,20 +360,26 @@ class BaseHarvester:
                 if not re.search(url_pattern, full_url):
                     continue
 
-            # 3. Rank Assignment
-            # We increment rank counter regardless of whether we skip the article (to preserve original order)
+            # 3. Date Check (URL Heuristic)
+            # Extract YYYY-MM-DD or YYYY/MM/DD
+            url_date = None
+            date_match = re.search(r"(\d{4}[-/]\d{2}[-/]\d{2})", full_url)
+            if date_match:
+                date_str = date_match.group(1).replace("/", "-")
+                if not self._is_date_recent(date_str):
+                    continue
+                url_date = date_str
+
+            # 4. Rank Assignment
             rank = None
             if is_ranked:
                 rank_counter += 1
                 rank = rank_counter
             
-            # 4. Hash Check (Optimization)
+            # 5. Hash Check (Optimization)
             url_hash = self._compute_hash(full_url)
             if ignore_hashes and url_hash in ignore_hashes:
                 continue
-
-            # Attempt to extract date from URL (heuristic)
-            url_date = re.match(r"\d{4}-\d{2}-\d{2}|\d{4}/\d{2}/\d{2}", full_url)
 
             articles.append({
                 "title": link_text,
@@ -378,33 +401,34 @@ class BaseHarvester:
         blocklist=None,
         allowed_sections=None,
         ignore_hashes=None,
+        use_browser=False
     ) -> list[dict]:
         """ Standard Sitemap Fetcher (XML) """
         xml_content = None
-        
-        for agent in self.user_agents:
-            try:
-                headers = self.headers.copy()
-                headers["User-Agent"] = agent
-                
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=120), headers=headers
-                ) as response:
-                    if response.status == 200:
-                        xml_content = await response.read()
-                        break
-                    elif response.status == 403:
-                        logger.warning(f"403 Forbidden on {url} with UA {agent[:20]}... Rotating.")
-                        continue
-                    else:
-                        logger.error(f"Response Error {url}: {response.status}")
-                        return []
-            except Exception as e:
-                logger.warning(f"Sitemap fail {url} with UA {agent[:20]}: {e}")
-                continue
+        if not use_browser:
+            for agent in self.user_agents:
+                try:
+                    headers = self.headers.copy()
+                    headers["User-Agent"] = agent
+                    
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=120), headers=headers
+                    ) as response:
+                        if response.status == 200:
+                            xml_content = await response.read()
+                            break
+                        elif response.status == 403:
+                            logger.warning(f"403 Forbidden on {url} with UA {agent[:20]}... Rotating.")
+                            continue
+                        else:
+                            logger.error(f"Response Error {url}: {response.status}")
+                            return []
+                except Exception as e:
+                    logger.warning(f"Sitemap fail {url} with UA {agent[:20]}: {e}")
+                    continue
 
         if not xml_content:
-            logger.warning(f"⚠️ All User-Agents failed for {url}. Attempting Browser Fallback...")
+            logger.warning(f" Attempting Browser...")
             xml_content = await self._fetch_text_browser(url)
             if not xml_content:
                 logger.error(f"❌ All User-Agents AND Browser Fallback failed for {url}")
@@ -441,11 +465,10 @@ class BaseHarvester:
                 pdate = news.find("news:publication_date")
                 if pdate: pub_date = pdate.text
 
-            if pub_date:
-                # Basic check: is it from the current year?
-                if str(datetime.now().year) not in pub_date:
-                    continue
-
+            if pub_date and not self._is_date_recent(pub_date):
+                continue
+            
+            
             articles.append({
                 "title": "Unknown", # Sitemaps rarely have titles
                 "link": link,
@@ -511,7 +534,7 @@ class BaseHarvester:
             date_tag = item.find(["pubDate", "published", "dc:date"])
             pub_date_str = date_tag.text.strip() if date_tag else None
 
-            if pub_date_str and str(datetime.now().year) not in pub_date_str:
+            if pub_date_str and not self._is_date_recent(pub_date_str):
                 continue
 
             content_encoded = item.find("content:encoded")
@@ -613,7 +636,7 @@ class BaseHarvester:
         """Fallback: Fetch raw content using Playwright."""
         try:
             async with async_playwright() as p:
-                for browser_name in ["chromium", "firefox"]:
+                for browser_name in ["firefox", "chromium"]:
                     try:
                         browser_type = getattr(p, browser_name)
                         # Chromium needs sandbox flags in Docker
@@ -642,6 +665,12 @@ class BaseHarvester:
                                 viewport={"width": 1280, "height": 800}
                             )
                             page = await context.new_page()
+
+                            # Block heavy resources
+                            await page.route("**/*", lambda route: route.abort() 
+                                if route.request.resource_type in ["image", "media", "font"] 
+                                else route.continue_()
+                            )
 
                             logger.info(f"🎭 {browser_name.capitalize()} navigating to {url}...")
                             response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
@@ -707,3 +736,28 @@ class BaseHarvester:
 
     def _compute_hash(self, url: str) -> str:
         return hashlib.md5(url.split("?")[0].encode()).hexdigest()
+
+    def _is_date_recent(self, date_str: str) -> bool:
+        """Parses date and checks if it is within the cutoff window."""
+        if not date_str: return True
+        try:
+            dt = None
+            # 1. Try ISO 8601 (Sitemaps, Atom)
+            try:
+                dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            except ValueError:
+                # 2. Try RFC 822 (RSS)
+                try:
+                    dt = parsedate_to_datetime(date_str)
+                except Exception:
+                    pass
+            
+            if dt:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt < self.cutoff_date:
+                    return False
+        except Exception:
+            # If we can't parse, we assume it's recent/valid to be safe
+            return True
+        return True
