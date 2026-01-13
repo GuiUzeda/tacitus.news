@@ -17,6 +17,13 @@ The system is designed as a Cyborg Pipeline:
 
 The pipeline moves data through a series of PostgreSQL Queues (articles_queue, events_queue).
 
+### ⚙️ Database Automation (pg_cron)
+
+Critical maintenance and scoring logic is offloaded to the database to ensure consistency and performance:
+
+*   **Hot Score Decay (`update_hot_scores_job`):** Runs every 15 mins. Updates `hot_score` using the formula: `EditorialScore / (HoursElapsed + 2)^1.5`.
+*   **The Archivist (`archivist_daily_sweep`):** Runs daily at 03:00 UTC. Archives events that are >7 days old (with low score) or >14 days old.
+*   **Queue Janitor (`clean_editorial_queues_job`):** Runs daily at 03:00 UTC. Deletes completed/failed queue items older than 3 days.
 
 
 ## 🔁 Part 1: The Automated Loop (Cron Jobs)
@@ -44,7 +51,7 @@ These scripts are designed to run continuously or periodically to build up the b
 * **Logic:**
     * **Match:** Merges into existing event immediately.
     * **New:** Creates a new event.
-    * **Updates:** Aggregates `editorial_score`, `best_source_rank`, and Interest counts via `EventAggregator`.
+    * **Updates:** Aggregates `editorial_score`, `best_source_rank`, `main_topic_counts`, and Interest counts via `EventAggregator`.
     * **Ambiguous:** Creates a MergeProposal and flags it for review.
 * **Run:** `python news_cluster.py`
 
@@ -81,7 +88,7 @@ These steps involve high-level analysis or human finalization.
 * **Role:** Reads from ENHANCER queue. Aggregates intelligence and prepares the event for publication.
 * **Intelligence:**
     * **Batch Processing:** Analyzes new articles in batches to extract Entities, Stance, and Clickbait scores.
-    * **Aggregation:** Updates Event-level stats (Bias Distribution, Interest Counts) via `EventAggregator`.
+    * **Aggregation:** Updates Event-level stats (Bias, `ai_impact_score`, `category_tag`) via `EventAggregator`.
     * **Summarization:** Generates/Updates the "Ground News" style summary (Left/Center/Right).
     * **Flow:** Moves completed events to the `PUBLISHER` queue.
 * **Run:** `python workers/enhancer.py`
@@ -95,6 +102,13 @@ The central dashboard for the Editor.
 * **[5] Find & Merge Duplicates:** Utility to clean up split events.
 * **[6] Publishing Review:** Final sign-off for events in the `PUBLISHER` queue before they go live.
 * **Run:** `python cli.py`
+
+## 📊 Key Metrics
+
+*   **Editorial Score:** The raw importance score derived from source rankings and entity matches.
+*   **Hot Score:** A dynamic, time-decayed score used to rank "Trending" events. Formula: `EditorialScore / (Age + 2)^1.5`.
+*   **AI Impact Score:** An AI-generated assessment of the event's potential societal or industry impact.
+*   **Category Tag:** High-level classification (e.g., "Politics", "Technology") assigned during enhancement.
 
 ## 🖥️ Monitoring
 
