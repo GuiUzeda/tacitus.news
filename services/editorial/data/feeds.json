@@ -4,8 +4,8 @@
     "bias": "center",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "conglomerado",
+    "description": "Maior portal de conteúdo do Brasil, pioneiro na internet e parte do Grupo Folha.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://uol.com.br",
@@ -24,8 +24,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "conglomerado",
+    "description": "Principal jornal do Rio de Janeiro e um dos maiores do país, parte do Grupo Globo.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://oglobo.globo.com",
@@ -44,8 +44,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "conglomerado",
+    "description": "Jornal tradicional de São Paulo, referência em cobertura econômica e política com viés liberal.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://www.estadao.com.br",
@@ -68,8 +68,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Veículo digital focado na cobertura dos bastidores do poder em Brasília e no Congresso.",
+    "ownership_type": "private",
     "feeds": [
       {
         "name": "Poder360",
@@ -90,8 +90,8 @@
     "bias": "left",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "independente",
+    "description": "Mídia independente e progressista, focada em notícias diárias e análise crítica.",
+    "ownership_type": "independent",
     "feeds": [
       {
         "url": "https://iclnoticias.com.br",
@@ -107,8 +107,8 @@
     "bias": "left",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Revista e portal com linha editorial de esquerda, focada em política, economia e sociedade.",
+    "ownership_type": "private",
     "feeds": [
       {
         "url": "https://www.cartacapital.com.br",
@@ -130,8 +130,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Jornal de maior circulação nacional, conhecido por sua pluralidade e cobertura política.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://www.folha.uol.com.br",
@@ -158,8 +158,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Canal de notícias 24h focado em hard news, política e economia.",
+    "ownership_type": "private",
     "feeds": [
       {
         "url": "https://www.cnnbrasil.com.br",
@@ -181,8 +181,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Portal de notícias da Globo, agregando jornalismo televisivo e cobertura local.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://g1.globo.com",
@@ -203,8 +203,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Portal do Grupo Record, combinando jornalismo popular, entretenimento e serviços.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://www.r7.com/arc/outboundfeeds/sitemap"
@@ -216,8 +216,8 @@
     "bias": "right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Emissora de rádio e TV com forte alinhamento conservador e foco em opinião.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://jovempan.com.br",
@@ -237,8 +237,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Rede tradicional de TV e Rádio com foco em jornalismo investigativo e esportes.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://www.band.com.br",
@@ -259,8 +259,8 @@
     "bias": "leans_right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Maior portal especializado em mercados, investimentos e negócios do Brasil.",
+    "ownership_type": "corporate",
     "feeds": [
       {
         "name": "InfoMoney",
@@ -280,8 +280,8 @@
     "bias": "leans_left",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Jornal cearense de referência, com forte cobertura regional e direitos humanos.",
+    "ownership_type": "private",
     "feeds": [
       {
         "url": "https://www.opovo.com.br/sitemap-news-day.xml"
@@ -293,8 +293,8 @@
     "bias": "center",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Nativo digital de Brasília, focado em furos de reportagem, política e entretenimento.",
+    "ownership_type": "private",
     "feeds": [
       {
         "url": "https://www.metropoles.com",
@@ -320,11 +320,391 @@
     "bias": "right",
     "icon_url": "",
     "logo_url": "",
-    "description": "",
-    "ownership_type": "",
+    "description": "Principal jornal econômico do país, leitura essencial para o mercado financeiro.",
+    "ownership_type": "conglomerate",
     "feeds": [
       {
         "url": "https://valor.globo.com/sitemap/valor/news.xml"
+      }
+    ]
+  },
+  {
+    "name": "Gazeta do Povo",
+    "bias": "right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Jornal paranaense de alcance nacional, conhecido por suas colunas de opinião conservadoras.",
+    "ownership_type": "conglomerate",
+    "feeds": [
+      {
+        "url": "https://www.gazetadopovo.com.br/",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "gazetadopovo\\.com\\.br/(?!duvidas-frequentes|expediente|fale-conosco|mapa|newsletter|podcasts|politica-de-privacidade|redes-sociais|sobre|termos-de-uso|ultimas-noticias|videos|minha-conta|assinatura|login|search|tag|gallery)(?:[\\w-]+/)+[\\w-]+",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|videos|podcasts|duvidas-frequentes|expediente|fale-conosco|mapa|newsletter|politica-de-privacidade|redes-sociais|sobre|termos-de-uso|minha-conta|assinatura)"
+      },
+      {
+        "url": "https://www.gazetadopovo.com.br/sitemap.xml",
+        "feed_type": "sitemap_index_date",
+        "url_pattern": "https://www.gazetadopovo.com.br/\\d{4}/\\d{2}/(\\d{4}-\\d{2}-\\d{2}).xml"
+      },
+      {
+        "url": "https://www.gazetadopovo.com.br/sitemap.xml",
+        "feed_type": "sitemap_index_date",
+        "url_pattern": "https://www.gazetadopovo.com.br/\\d{4}/\\d{2}/(\\d{4}-\\d{2}-\\d{2})-gnews.xml"
+      }
+    ]
+  },
+  {
+    "name": "Revista Oeste",
+    "bias": "right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Publicação digital independente com viés liberal na economia e conservador nos costumes.",
+    "ownership_type": "independent",
+    "feeds": [
+      {
+        "url": "https://revistaoeste.com/",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "revistaoeste\\.com/(?!autor|colunista|colunistas|videos|anuncie-conosco|assine|fale-conosco|faq|login|minha-conta|nossa-equipe|nosso-pacto|parceiros-de-tv|politica-de-privacidade|preferencias|projetos-especiais-oeste|edicoes-anteriores|ultimas-noticias|imprensa|wp-login|por-que-oeste|radio)(?:[\\w-]+/)+[\\w-]+",
+        "blocklist": "(login|search|tag|gallery|publicidade|patrocinado|videos|podcasts|edicao-\\d+/?$)"
+      },
+      {
+        "url": "https://revistaoeste.com/sitemap/sitemap-posts.xml"
+      }
+    ]
+  },
+  {
+    "name": "Brasil 247",
+    "bias": "left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Veículo de mídia progressista focado em política e direitos sociais.",
+    "ownership_type": "private",
+    "feeds": [
+      {
+        "url": "https://www.brasil247.com",
+        "feed_type": "html",
+        "is_ranked": true,
+        "use_browser_render": true,
+        "scroll_depth": 4,
+        "url_pattern": "brasil247\\.com/(?!authors|tag|equipe|info|colunistas|chargista|conteudo-publicitario|tabela|search|login)(?:[\\w-]+/)+[\\w-]+",
+        "blocklist": "(authors|tag|equipe|info|colunistas|chargista|conteudo-publicitario|tabela|search|login)"
+      },
+      {
+        "url": "https://www.brasil247.com/sitemaps/sitemap.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://www\\.brasil247\\.com/sitemaps/sitemap-(\\d+)\\.xml"
+      },
+      {
+        "url": "https://www.brasil247.com/sitemaps/sitemap-today.xml"
+      }
+    ]
+  },
+  {
+    "name": "The Intercept Brasil",
+    "bias": "left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Jornalismo investigativo focado em política, corrupção e segurança pública.",
+    "ownership_type": "non_profit",
+    "feeds": [
+      {
+        "url": "https://www.intercept.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "intercept\\.com\\.br/\\d{4}/\\d{2}/\\d{2}/[\\w-]+",
+        "blocklist": "(login|search|tag|author|page|videos|newsletter|apoie|politica-de-privacidade|termos-de-uso)"
+      },
+      {
+        "url": "https://www.intercept.com.br/sitemap_index.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://www\\.intercept\\.com\\.br/post-sitemap(\\d+)\\.xml"
+      }
+    ]
+  },
+  {
+    "name": "Nexo Jornal",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Jornalismo de contexto e dados, focado em explicar as notícias.",
+    "ownership_type": "private",
+    "feeds": [
+      {
+        "url": "https://www.nexojornal.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "nexojornal\\.com\\.br/(?:[\\w-]+/)+\\d{4}/\\d{2}/\\d{2}/[\\w-]+",
+        "blocklist": "(assine|conta|cursos|sobre|tema|ultimas|index|login)"
+      },
+      {
+        "url": "https://wp.nexojornal.com.br/sitemap_index.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://wp\\.nexojornal\\.com\\.br/(?:post|story)-sitemap(\\d+)\\.xml"
+      },
+      {
+        "url": "https://wp.nexojornal.com.br/sitemap_index.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://wp\\.nexojornal\\.com\\.br/(?:opinion)-sitemap(\\d+)?\\.xml"
+      },
+      {
+        "url": "https://wp.nexojornal.com.br/sitemap_index.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://wp\\.nexojornal\\.com\\.br/(?:academic)-sitemap(\\d+)?\\.xml"
+      }
+    ]
+  },
+  {
+    "name": "BBC News Brasil",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Jornalismo internacional de referência, com foco em análise e imparcialidade.",
+    "ownership_type": "public_broadcaster",
+    "feeds": [
+      {
+        "url": "https://www.bbc.com/portuguese",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "bbc\\.com/portuguese/(?:articles|podcasts)/[\\w-]+",
+        "blocklist": "(topics|institutional|resources|usingthebbc|cookies|ws)"
+      }
+    ]
+  },
+  {
+    "name": "NeoFeed",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Cobertura focada em negócios, inovação, startups e mercado financeiro.",
+    "ownership_type": "private",
+    "feeds": [
+      {
+        "url": "https://neofeed.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "neofeed\\.com\\.br/(?!autor|brand-stories|noticias-sobre|sobre-nos|anuncie|manifesto|podcasts|videos|neoconference|neosummit|politica-de-privacidade|termos-de-uso|experts|insiders)(?:[\\w-]+/)+[\\w-]+",
+        "blocklist": "(autor|brand-stories|noticias-sobre|sobre-nos|anuncie|manifesto|podcasts|videos|neoconference|neosummit|experts|insiders)"
+      },
+      {
+        "url": "https://neofeed.com.br/posts-hoje.xml",
+        "feed_type": "sitemap",
+        "description": "Daily updates"
+      },
+      {
+        "url": "https://neofeed.com.br/post-negocios.xml",
+        "feed_type": "sitemap",
+        "description": "Business Section"
+      },
+      {
+        "url": "https://neofeed.com.br/post-economia.xml",
+        "feed_type": "sitemap",
+        "description": "Economy Section"
+      },
+      {
+        "url": "https://neofeed.com.br/post-startups.xml",
+        "feed_type": "sitemap",
+        "description": "Startups Section"
+      }
+    ]
+  },
+  {
+    "name": "DW Brasil",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Serviço brasileiro da emissora pública alemã, focado em temas internacionais, sustentabilidade e ciência.",
+    "ownership_type": "public_broadcaster",
+    "feeds": [
+      {
+        "url": "https://www.dw.com/pt-br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "dw\\.com/pt-br/(?:[\\w-]+/)+a-\\d+",
+        "blocklist": "(multimidia|media-center|sobre-a-dw|quem-somos)"
+      },
+      {
+        "url": "https://www.dw.com/pt-002/article-sitemap.xml"
+      },
+      {
+        "url": "https://www.dw.com/pt-002/news-sitemap.xml"
+      },
+      {
+        "url": "https://www.dw.com/pt-002/person-sitemap.xml"
+      }
+    ]
+  },
+  {
+    "name": "Agência Pública",
+    "bias": "left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Jornalismo investigativo independente e sem fins lucrativos, focado em administração pública e direitos humanos.",
+    "ownership_type": "non_profit",
+    "feeds": [
+      {
+        "url": "https://apublica.org",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "apublica\\.org/\\d{4}/\\d{2}/[\\w-]+",
+        "blocklist": "(quem-somos|apoie|transparencia|republique|contato|podcast|video)"
+      },
+      {
+        "url": "https://apublica.org/sitemap_index.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://apublica\\.org/post-sitemap(\\d+)\\.xml"
+      },
+      {
+        "url": "https://apublica.org/sitemap_index.xml",
+        "feed_type": "sitemap_index_id",
+        "url_pattern": "https://apublica\\.org/attachment-sitemap(\\d+)\\.xml"
+      }
+    ]
+  },
+  {
+    "name": "Congresso em Foco",
+    "bias": "leans_left",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Cobertura especializada no Congresso Nacional e bastidores da política em Brasília.",
+    "ownership_type": "independent",
+    "feeds": [
+      {
+        "url": "https://congressoemfoco.uol.com.br/feed/",
+        "feed_type": "rss"
+      },
+      {
+        "url": "https://www.congressoemfoco.com.br/sitemap.xml",
+        "url_pattern": "https://www\\.congressoemfoco\\.com\\.br/sitemap-(\\d+)\\.xml",
+        "feed_type": "sitemap_index_id"
+      }
+    ]
+  },
+  {
+    "name": "JOTA",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Jornalismo jurídico e de análise política, focado nos tribunais superiores e regulação.",
+    "ownership_type": "private",
+    "feeds": [
+      {
+        "url": "https://sitemap.jota.info/sitemap-index.xml",
+        "url_pattern": "https://sitemap\\.jota\\.info/posts/\\d{4}/sitemap-post-(\\d+-\\d{4})\\.xml",
+        "feed_type": "sitemap_index_date_id"
+      },
+      {
+        "url": "https://sitemap.jota.info/sitemap-google-news.xml"
+      }
+    ]
+  },
+  {
+    "name": "GZH (Zero Hora)",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Maior veículo de comunicação do Sul do Brasil, essencial para cobertura regional e agronegócio.",
+    "ownership_type": "conglomerate",
+    "feeds": [
+      {
+        "url": "https://gauchazh.clicrbs.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "gauchazh\\.clicrbs\\.com\\.br/(?:[\\w-]+/)+noticia/\\d{4}/\\d{2}/[\\w-]+",
+        "blocklist": "(conteudo-de-marca|especiais|pioneiro|video|passatempos)"
+      },
+      {
+        "url": "https://gauchazh.clicrbs.com.br/sitemap/today.xml",
+        "feed_type": "sitemap",
+        "description": "Sitemap diário otimizado"
+      }
+    ]
+  },
+  {
+    "name": "Correio Braziliense",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Principal jornal da capital federal, com forte cobertura de funcionalismo público e cidades.",
+    "ownership_type": "conglomerate",
+    "feeds": [
+      {
+        "url": "https://www.correiobraziliense.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "correiobraziliense\\.com\\.br/(?:[\\w-]+/)?\\d{4}/\\d{2}/\\d{2,}-[\\w-]+\\.html",
+        "blocklist": "(cb-brands|webstories|divirtasemais|gastronomia|turismo|tecnologia|ciencia-e-saude|busca)"
+      },
+      {
+        "url": "https://www.correiobraziliense.com.br/sitemap/map/day/sitemap-news.xml",
+        "feed_type": "sitemap",
+        "description": "Google News Sitemap"
+      }
+    ]
+  },
+  {
+    "name": "Exame",
+    "bias": "leans_right",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Publicação de negócios e economia focada em investimentos, ESG e carreira.",
+    "ownership_type": "corporate",
+    "feeds": [
+      {
+        "url": "https://exame.com",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "exame\\.com/(?!bussola|invest|casual|pop|marketing|tecnologia)(?:[\\w-]+/)+[\\w-]+",
+        "blocklist": "(bussola|casual|future-of-money|academy|eventos|webstories)"
+      },
+      {
+        "url": "https://exame.com/feed/",
+        "feed_type": "rss"
+      },
+      {
+        "url": "https://exame.com/artigos/sitemap.xml",
+        "feed_type": "sitemap_index_date",
+        "url_pattern": "https://exame\\.com/artigos/(\\d{4}-\\d{2})/sitemap\\.xml"
+      },
+      {
+        "url": "https://exame.com/noticias/sitemap.xml"
+      },
+      {
+        "url": "https://exame.com/reportagens-especiais/sitemap.xml",
+        "feed_type": "sitemap_index_date",
+        "url_pattern": "https://exame\\.com/reportagens-especiais/(\\d{4}-\\d{2})/sitemap\\.xml"
+      },
+      {
+        "url": "https://exame.com/webstories/sitemap.xml",
+        "feed_type": "sitemap_index_date",
+        "url_pattern": "https://exame\\.com/webstories/(\\d{4}-\\d{2})/sitemap\\.xml"
+      }
+    ]
+  },
+  {
+    "name": "Bloomberg Línea",
+    "bias": "center",
+    "icon_url": "",
+    "logo_url": "",
+    "description": "Cobertura de negócios focada na América Latina e conexões globais.",
+    "ownership_type": "private",
+    "feeds": [
+      {
+        "url": "https://www.bloomberglinea.com.br",
+        "feed_type": "html",
+        "is_ranked": true,
+        "url_pattern": "bloomberglinea\\.com\\.br/\\d{4}/\\d{2}/\\d{2}/[\\w-]+",
+        "blocklist": "(bloomberg-businessweek|english|autores|temas)"
+      },
+      {
+        "url": "https://www.bloomberglinea.com.br/arc/outboundfeeds/new-news-feed/?outputType=xml",
+        "feed_type": "sitemap",
+        "description": "Feed principal de notícias"
+      },
+      {
+        "url": "https://www.bloomberglinea.com.br/arc/outboundfeeds/new-news-feed-organic/?outputType=xml"
       }
     ]
   }

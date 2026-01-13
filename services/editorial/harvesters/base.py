@@ -25,11 +25,15 @@ class BaseHarvester:
         
         # Expanded User Agent List for Rotation
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
             "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
             "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
         ]
@@ -129,6 +133,12 @@ class BaseHarvester:
              return await self.harvest_latest_date(
                  session, url, date_pattern=source.get("url_pattern")
              )
+        
+        elif feed_type == "sitemap_index_date_id":
+             # Assumes url_pattern contains a composite regex like (\d+-\d{4})
+             return await self.harvest_latest_date_id(
+                 session, url, pattern=source.get("url_pattern")
+             )
 
         return []
 
@@ -201,7 +211,16 @@ class BaseHarvester:
             # Ensure 'playwright install chromium' has been run in your Dockerfile
             browser = await p.chromium.launch(
                 headless=True, 
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
+                args=[
+                        "--disable-blink-features=AutomationControlled", # CRÍTICO: Remove a flag 'navigator.webdriver'
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-infobars",
+                        "--window-position=0,0",
+                        "--ignore-certifcate-errors",
+                        "--ignore-certifcate-errors-spki-list",
+                        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ]
             )
             
             context = await browser.new_context(
@@ -357,7 +376,11 @@ class BaseHarvester:
                 continue
 
         if not xml_content:
-            return []
+            logger.warning(f"⚠️ All User-Agents failed for {url}. Attempting Browser Fallback...")
+            xml_content = await self._fetch_text_browser(url)
+            if not xml_content:
+                logger.error(f"❌ All User-Agents AND Browser Fallback failed for {url}")
+                return []
             
         soup = BeautifulSoup(xml_content, "xml")
         articles = []
@@ -499,7 +522,7 @@ class BaseHarvester:
             match = id_re.search(loc_url)
             if match:
                 try:
-                    sitemap_id = int(match.group(1))
+                    sitemap_id = int(match.group(1) or 0)
                     valid_locs.append((sitemap_id, loc_url))
                 except ValueError: continue
 
@@ -541,6 +564,95 @@ class BaseHarvester:
         if not valid_locs: return []
         
         # Sort Descending (2026-01-06 > 2026-01-05)
+        valid_locs.sort(key=lambda x: x[0], reverse=True)
+        _, best_url = valid_locs[0]
+
+        return await self._fetch(session, best_url, blocklist, allowed_sections)
+
+    async def _fetch_text_browser(self, url: str) -> Optional[bytes]:
+        """Fallback: Fetch raw content using Playwright."""
+        try:
+            async with async_playwright() as p:
+                for browser_name in ["chromium", "firefox"]:
+                    try:
+                        browser_type = getattr(p, browser_name)
+                        # Chromium needs sandbox flags in Docker
+                        args=[
+                        "--disable-blink-features=AutomationControlled", # CRÍTICO: Remove a flag 'navigator.webdriver'
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-infobars",
+                        "--window-position=0,0",
+                        "--ignore-certifcate-errors",
+                        "--ignore-certifcate-errors-spki-list",
+                        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ] 
+                        
+                        browser = await browser_type.launch(headless=True, args=args)
+                        
+                        try:
+                            context = await browser.new_context(
+                                user_agent=self.user_agents[0],
+                                viewport={"width": 1280, "height": 800}
+                            )
+                            page = await context.new_page()
+
+                            response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                            
+                            status = 0
+                            if response:
+                                # Handle potential API difference (method vs property)
+                                status = response.status if isinstance(response.status, int) else response.status()
+
+                            if status == 200:
+                                return await response.body()
+                        except Exception as e:
+                            logger.warning(f"{browser_name.capitalize()} Fallback internal error {url}: {e}")
+                        finally:
+                            await browser.close()
+                    except Exception as e:
+                         logger.error(f"{browser_name.capitalize()} Launch failed: {e}")
+        except Exception as e:
+             logger.error(f"Browser Driver failed: {e}")
+        
+        return None
+
+    async def harvest_latest_date_id(self, session, url, pattern, blocklist=None, allowed_sections=None):
+        """ 
+        Fetch sitemap index with composite ID (e.g. 10-2024).
+        Splits by '-' and sorts by (Year, ID) descending.
+        """
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200: return []
+                xml_content = await response.read()
+        except Exception as e:
+            logger.warning(f"Sitemap Index fail {url}: {e}")
+            return []
+
+        soup = BeautifulSoup(xml_content, "xml")
+        maps = soup.find_all("sitemap")
+        pattern_re = re.compile(pattern)
+
+        valid_locs = []
+        for m in maps:
+            loc_tag = m.find("loc")
+            if not loc_tag: continue
+            loc_url = loc_tag.text.strip()
+            match = pattern_re.search(loc_url)
+            if match:
+                val = match.group(1) # e.g. "10-2024"
+                try:
+                    # Handle "10-2024" -> sort by (2024, 10)
+                    parts = val.split('-')
+                    if len(parts) == 2:
+                        sort_key = (int(parts[1]), int(parts[0]))
+                        valid_locs.append((sort_key, loc_url))
+                except: continue
+
+        if not valid_locs: return []
+        
+        # Sort Descending by Year then ID
         valid_locs.sort(key=lambda x: x[0], reverse=True)
         _, best_url = valid_locs[0]
 

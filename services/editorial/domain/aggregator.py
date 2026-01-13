@@ -81,6 +81,18 @@ class EventAggregator:
         event.interest_counts = current
 
     @staticmethod
+    def aggregate_main_topics(event: NewsEventModel, topics: List[str] | None):
+        """Aggregates main topics into the event."""
+        if not topics: return
+
+        current = dict(event.main_topic_counts or {})
+        
+        for topic in topics:
+            current[topic] = current.get(topic, 0) + 1
+        
+        event.main_topic_counts = current
+
+    @staticmethod
     def aggregate_metadata(event: NewsEventModel, article: ArticleModel):
         """Aggregates Newspaper Bias (Source tracking) and Ownership stats."""
         if not article.newspaper: return

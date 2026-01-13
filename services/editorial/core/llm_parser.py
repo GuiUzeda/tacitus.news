@@ -141,7 +141,7 @@ class CloudNewsFilter:
         - **Security and crimes:** Public Security, Crimes
         
         **EXCLUDE (Strict Blocklist):**
-        - Sports Results / Football Games / Sports teams.
+        - Sports Results / Football Games / Sports teams / Football Games Results.
         - Celebrity Gossip / Novelas / Reality Shows (BBB).
         - Horoscopes / Recipes / lifestyle tips.
         - Product Reviews (e.g., "Review of iPhone 16"), including cars

@@ -38,7 +38,7 @@ class ClusterResult:
 class NewsCluster:
     def __init__(self):
         self.settings = Settings()
-        self.engine = create_engine(str(self.settings.pg_dsn))
+        self.engine = create_engine(str(self.settings.pg_dsn), pool_pre_ping=True)
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
@@ -67,7 +67,7 @@ class NewsCluster:
                 MergeProposalModel.target_event_id != event.id,
                 MergeProposalModel.status == JobStatus.PENDING,
             )
-            .values(status=JobStatus.REJECTED)
+            .values(status=JobStatus.REJECTED, updated_at=datetime.now(timezone.utc))
         )
         session.execute(
             update(MergeProposalModel)
@@ -75,7 +75,7 @@ class NewsCluster:
                 MergeProposalModel.source_article_id == article.id,
                 MergeProposalModel.target_event_id == event.id,
             )
-            .values(status=JobStatus.APPROVED)
+            .values(status=JobStatus.APPROVED, updated_at=datetime.now(timezone.utc))
         )
 
         self._mark_article_queue_completed(session, article.id)
@@ -92,7 +92,7 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.source_article_id == article.id)
-            .values(status=JobStatus.REJECTED)
+            .values(status=JobStatus.REJECTED, updated_at=datetime.now(timezone.utc))
         )
 
         self._mark_article_queue_completed(session, article.id)
@@ -155,6 +155,13 @@ class NewsCluster:
                 target_counts[bias] = target_counts.get(bias, 0) + count
             target_event.article_counts_by_bias = target_counts
 
+        # E. Main Topics (Merge)
+        if source_event.main_topic_counts:
+            target_topics = dict(target_event.main_topic_counts or {})
+            for topic, count in source_event.main_topic_counts.items():
+                target_topics[topic] = target_topics.get(topic, 0) + count
+            target_event.main_topic_counts = target_topics
+
         # 3. Tombstone (Enterrar o Source)
         source_event.is_active = False
         source_event.status = EventStatus.MERGED
@@ -166,12 +173,12 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
-            .values(status=JobStatus.REJECTED, reasoning="Target event was merged.")
+            .values(status=JobStatus.REJECTED, reasoning="Target event was merged.", updated_at=datetime.now(timezone.utc))
         )
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.source_event_id == source_event.id)
-            .values(status=JobStatus.REJECTED, reasoning="Source event was merged.")
+            .values(status=JobStatus.REJECTED, reasoning="Source event was merged.", updated_at=datetime.now(timezone.utc))
         )
 
         # Remove jobs pendentes do evento morto para não travar workers
@@ -472,6 +479,7 @@ class NewsCluster:
 
         # 3. Interests & Metadata
         EventAggregator.aggregate_interests(event, article.interests)
+        EventAggregator.aggregate_main_topics(event, article.main_topics)
         EventAggregator.aggregate_metadata(event, article)
 
         # 4. Local Search Optimization (Keep search_text updated)
@@ -500,6 +508,7 @@ class NewsCluster:
         init_bias = {}
         init_counts = {}
         init_ownership = {}
+        init_main_topics = {}
 
         if article.interests:
             for category, items in article.interests.items():
@@ -514,6 +523,10 @@ class NewsCluster:
 
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
+
+        if article.main_topics:
+            for topic in article.main_topics:
+                init_main_topics[topic] = 1
 
         # 2. Create Event (With initial Score values)
         # Rank Logic: If the first article has a rank, use it.
@@ -535,6 +548,7 @@ class NewsCluster:
             
             # Aggregations
             interest_counts=init_interests,
+            main_topic_counts=init_main_topics,
             article_counts_by_bias=init_counts,
             bias_distribution=init_bias,
             ownership_stats=init_ownership,

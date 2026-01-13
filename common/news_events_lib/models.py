@@ -84,6 +84,10 @@ class NewsEventModel(BaseModel):
         JSONB, default=dict, nullable=True
     )
     
+    main_topic_counts: Mapped[Optional[Dict[str, int]]] = mapped_column(
+        JSONB, default=dict, nullable=True
+    )
+    
     ownership_stats: Mapped[Optional[Dict[str, int]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
@@ -322,7 +326,7 @@ class MergeProposalModel(BaseModel):
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
-
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     # Relationships
     source_article: Mapped[Optional["ArticleModel"]] = relationship(
         foreign_keys=[source_article_id]

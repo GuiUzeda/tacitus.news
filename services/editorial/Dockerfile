@@ -1,43 +1,58 @@
-FROM python:3.11-slim-bookworm
+# syntax=docker/dockerfile:1
+# Stage 1: Builder
+FROM python:3.11-slim-bookworm as builder
 
-# 1. Install System Dependencies
-# 'curl' and 'build-essential' for python libs
-# Playwright dependencies will be installed by the 'playwright install-deps' command later
-RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# 2. Setup Workdir
 WORKDIR /app
 
-# 3. Install Common Lib (Local Dependency)
-# We copy the common folder first to leverage Docker cache
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY common /app/common
-RUN pip install --no-cache-dir -e /app/common
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e /app/common
 
-# 4. Install Editorial Dependencies
 COPY services/editorial/requirements.txt /app/services/editorial/requirements.txt
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-RUN pip install --no-cache-dir -r /app/services/editorial/requirements.txt
-
-# 5. Install Playwright Browsers (Critical for Harvester)
-# This installs Chromium and its OS-level dependencies
-RUN playwright install chromium
-RUN playwright install-deps chromium
-COPY services/editorial/scripts/download.py /app/services/editorial/scripts/download.py
-RUN python services/editorial/scripts/download.py
-
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /app/services/editorial/requirements.txt
 
 RUN python -m spacy download pt_core_news_lg
 
-# 6. Copy Codebase
+# Stage 2: Runtime
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/services/editorial \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Install Playwright Browsers & Deps
+RUN playwright install --with-deps chromium firefox \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY services/editorial/scripts/download.py /app/services/editorial/scripts/download.py
+RUN python services/editorial/scripts/download.py
+
+# Copy Codebase
+COPY common /app/common
 COPY services/editorial /app/services/editorial
-
-
-
-
-# 7. Set Python Path so workers can find 'core', 'domain', etc.
-ENV PYTHONPATH=/app/services/editorial

@@ -14,3 +14,4 @@ tenacity
 sentence_transformers
 websockets
 einops
+brotli

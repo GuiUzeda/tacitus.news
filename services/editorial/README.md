@@ -103,7 +103,30 @@ The central dashboard for the Editor.
 * **[6] Publishing Review:** Final sign-off for events in the `PUBLISHER` queue before they go live.
 * **Run:** `python cli.py`
 
-## 🛠️ Setup & Configuration
+## 🖥️ Monitoring
+
+To visualize all workers running simultaneously in a grid layout, use the provided Tmux script located in the project root:
+
+```bash
+./monitor_tmux.sh
+```
+
+This will:
+1. Create a `tmux` session named `tacitus_logs`.
+2. Split the screen into a grid monitoring all workers + the backend.
+3. Attach to the session (Press `Ctrl+B` then `d` to detach).
+
+### 🎮 Tmux Navigation Cheatsheet
+
+Once inside the grid, use the following shortcuts (prefix is `Ctrl+b` by default):
+
+* **Navigate Panes:** Press `Ctrl+b` then `Arrow Keys` (Left, Right, Up, Down).
+* **Scroll Mode:** Press `Ctrl+b` then `[` (Use arrow keys or PageUp/Down to scroll). Press `q` to exit scroll mode.
+* **Detach (Keep running):** Press `Ctrl+b` then `d`.
+* **Re-attach:** Run `tmux attach -t tacitus_logs`.
+* **Kill Session:** Run `tmux kill-session -t tacitus_logs`.
+
+## �️ Setup & Configuration
 
 ### Environment Variables:
 Ensure .env contains:

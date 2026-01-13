@@ -14,6 +14,7 @@ from loguru import logger
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 # Project Imports
 from core.nlp_service import NLPService
@@ -21,10 +22,13 @@ from harvesters.base import BaseHarvester
 from news_events_lib.models import (
     ArticleContentModel,
     ArticleModel,
-    JobStatus
+    JobStatus,
+    NewspaperModel,
+    FeedModel
 )
 from core.models import ArticlesQueueModel, ArticlesQueueName
 from harvesters.factory import HarvesterFactory
+from config import Settings
 
 # --- MULTIPROCESSING HELPERS ---
 
@@ -106,7 +110,8 @@ class HarvestingDomain:
     ]
 
     def __init__(self, max_cpu_workers=3):
-
+        self.settings = Settings()
+        self.max_cpu_workers = max_cpu_workers
         
         # Initialize Executor for CPU tasks
         self.cpu_executor = ProcessPoolExecutor(
@@ -123,6 +128,90 @@ class HarvestingDomain:
 
     def shutdown(self):
         self.cpu_executor.shutdown(wait=True)
+
+    def warmup(self):
+        """
+        Forces the creation of worker processes and loading of models.
+        """
+        logger.info(f"🔥 Warming up {self.max_cpu_workers} CPU workers (loading AI models)...")
+        # Submit dummy tasks to force worker initialization
+        futures = [self.cpu_executor.submit(pow, 1, 1) for _ in range(self.max_cpu_workers)]
+        for f in futures:
+            f.result()
+        logger.success("✅ CPU workers ready.")
+
+    def sync_newspapers(self, session: Session):
+        """
+        Syncs the database with the feeds.json file.
+        """
+        import json
+        import os
+        
+        # Resolve path
+        feeds_path = self.settings.feeds_path
+        if not os.path.exists(feeds_path):
+             # Fallback for relative path from domain dir
+             feeds_path = os.path.join(os.path.dirname(__file__), "../data/feeds.json")
+        
+        if not os.path.exists(feeds_path):
+            logger.error(f"feeds.json not found at {feeds_path}")
+            return
+
+        try:
+            with open(feeds_path, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading feeds.json: {e}")
+            return
+
+        logger.info(f"🔄 Syncing {len(data)} newspapers from config...")
+        
+        for np_data in data:
+            # 1. Upsert Newspaper
+            stmt = select(NewspaperModel).where(NewspaperModel.name == np_data["name"])
+            newspaper = session.execute(stmt).scalar_one_or_none()
+            
+            if not newspaper:
+                newspaper = NewspaperModel(
+                    name=np_data["name"],
+                    bias=np_data.get("bias"),
+                    ownership_type=np_data.get("ownership_type", ""),
+                    icon_url=np_data.get("icon_url"),
+                    logo_url=np_data.get("logo_url"),
+                    description=np_data.get("description", ""),
+                )
+                session.add(newspaper)
+                session.flush()
+            else:
+                newspaper.bias = np_data.get("bias")
+                newspaper.ownership_type = np_data.get("ownership_type", "")
+            
+            # 2. Upsert Feeds
+            for feed_data in np_data.get("feeds", []):
+                feed_url = feed_data["url"]
+                
+                stmt_feed = select(FeedModel).where(FeedModel.url == feed_url)
+                feed = session.execute(stmt_feed).scalar_one_or_none()
+                
+                if not feed:
+                    feed = FeedModel(
+                        newspaper_id=newspaper.id,
+                        url=feed_url,
+                        feed_type=feed_data.get("feed_type", "sitemap"),
+                        is_active=True
+                    )
+                    session.add(feed)
+                
+                # Update Configs
+                feed.feed_type = feed_data.get("feed_type", "sitemap")
+                feed.url_pattern = feed_data.get("url_pattern")
+                feed.blocklist = feed_data.get("blocklist")
+                feed.allowed_sections = feed_data.get("allowed_sections")
+                feed.is_ranked = feed_data.get("is_ranked", False)
+                feed.use_browser_render = feed_data.get("use_browser_render", False)
+                feed.scroll_depth = feed_data.get("scroll_depth", 1)
+                
+        session.commit()
 
     async def process_newspaper(
         self, 
@@ -151,27 +240,43 @@ class HarvestingDomain:
                 else:
                     feeds.append(feed)
 
+            feed_list = ", ".join([f.get('url') for f in feeds])
+            logger.info(f"[{name}] 🚀 Harvesting {len(feeds)} feeds: {feed_list}")
+
             harvester_instance = self.factory.get_harvester(name)
             # 1. Pipeline Execution
-            articles_data = await self._run_pipeline(
+            total_saved = 0
+            batch = []
+            
+            # Consume the generator as results arrive
+            async for article_data in self._run_pipeline(
                 http_session, 
                 feeds, 
                 harvester_instance,
                 name, 
                 newspaper_data["id"], 
                 newspaper_data["article_hashes"]
-            )
+            ):
+                batch.append(article_data)
+                
+                # Save in small batches (e.g. 5) to yield results quickly
+                if len(batch) >= 5:
+                    saved_objs = self._bulk_save_articles(session, batch)
+                    if saved_objs:
+                        self._queue_articles_bulk(session, saved_objs)
+                        session.commit() # Commit immediately
+                        total_saved += len(saved_objs)
+                    batch = []
             
-            if not articles_data: return 0
+            # Save remaining
+            if batch:
+                saved_objs = self._bulk_save_articles(session, batch)
+                if saved_objs:
+                    self._queue_articles_bulk(session, saved_objs)
+                    session.commit()
+                    total_saved += len(saved_objs)
 
-            # 2. Save
-            saved_objs = self._bulk_save_articles(session, articles_data)
-            
-            # 3. Queue
-            if saved_objs:
-                self._queue_articles_bulk(session, saved_objs)
-            
-            return len(saved_objs)
+            return total_saved
 
         except Exception as e:
             logger.error(f"[{newspaper_data['name']}] Pipeline Failed: {e}")
@@ -185,9 +290,9 @@ class HarvestingDomain:
             raw_entries = await harvester.harvest(http_session, feeds)
         except Exception as e:
             logger.error(f"[{name}] Link fetch failed: {e}")
-            return []
+            return
 
-        if not raw_entries: return []
+        if not raw_entries: return
 
         # B. Fetch Content & Process (Concurrency Limit for IO)
         loop = asyncio.get_running_loop()
@@ -220,9 +325,12 @@ class HarvestingDomain:
                 partial(_process_entry_cpu_task, html, safe_entry, np_id)
             )
 
+        # Use as_completed to yield results as soon as they are ready
         tasks = [_process_entry(e) for e in raw_entries]
-        results = await asyncio.gather(*tasks)
-        return [r for r in results if r is not None]
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            if result:
+                yield result
 
     def _sanitize_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         """Ensures entry data is pickle-safe for multiprocessing"""

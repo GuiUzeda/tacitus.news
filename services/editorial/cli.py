@@ -38,7 +38,7 @@ from news_events_lib.models import (
 
 console = Console()
 settings = Settings()
-engine = create_engine(str(settings.pg_dsn))
+engine = create_engine(str(settings.pg_dsn), pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
 
@@ -367,6 +367,7 @@ class EditorialCLI:
             
             prop.status = JobStatus.APPROVED
             prop.reasoning = "Manual CLI Approval"
+            prop.updated_at = datetime.now(timezone.utc)
             session.add(prop)
             
             session.commit()
@@ -380,6 +381,7 @@ class EditorialCLI:
                 if db_p:
                     db_p.status = JobStatus.REJECTED
                     db_p.reasoning = "Manual CLI Rejection"
+                    db_p.updated_at = datetime.now(timezone.utc)
             session.commit()
             console.print("[yellow]🚫 Proposals rejected. Events kept separate.[/yellow]")
             time.sleep(1)
@@ -576,17 +578,17 @@ class EditorialCLI:
                     res1 = session.execute(
                         update(ArticlesQueueModel)
                         .where(ArticlesQueueModel.status == JobStatus.PROCESSING)
-                        .values(status=JobStatus.PENDING, msg="Manual Reset")
+                        .values(status=JobStatus.PENDING, msg="Manual Reset", updated_at=datetime.now(timezone.utc))
                     )
                     res2 = session.execute(
                         update(EventsQueueModel)
                         .where(EventsQueueModel.status == JobStatus.PROCESSING)
-                        .values(status=JobStatus.PENDING, msg="Manual Reset")
+                        .values(status=JobStatus.PENDING, msg="Manual Reset", updated_at=datetime.now(timezone.utc))
                     )
                     res3 = session.execute(
                         update(MergeProposalModel)
                         .where(MergeProposalModel.status == JobStatus.PROCESSING)
-                        .values(status=JobStatus.PENDING, reasoning="Manual Reset")
+                        .values(status=JobStatus.PENDING, reasoning="Manual Reset", updated_at=datetime.now(timezone.utc))
                     )
                     session.commit()
                     console.print(
@@ -598,17 +600,17 @@ class EditorialCLI:
                     res1 = session.execute(
                         update(ArticlesQueueModel)
                         .where(ArticlesQueueModel.status == JobStatus.FAILED)
-                        .values(status=JobStatus.PENDING, msg=None)
+                        .values(status=JobStatus.PENDING, msg=None, updated_at=datetime.now(timezone.utc))
                     )
                     res2 = session.execute(
                         update(EventsQueueModel)
                         .where(EventsQueueModel.status == JobStatus.FAILED)
-                        .values(status=JobStatus.PENDING, msg=None)
+                        .values(status=JobStatus.PENDING, msg=None, updated_at=datetime.now(timezone.utc))
                     )
                     res3 = session.execute(
                         update(MergeProposalModel)
                         .where(MergeProposalModel.status == JobStatus.FAILED)
-                        .values(status=JobStatus.PENDING, reasoning=None)
+                        .values(status=JobStatus.PENDING, reasoning=None, updated_at=datetime.now(timezone.utc))
                     )
                     session.commit()
                     console.print(
@@ -698,7 +700,7 @@ class EditorialCLI:
                     res = session.execute(
                         update(model_class)
                         .where(model_class.status == JobStatus.PROCESSING)
-                        .values(status=JobStatus.PENDING, msg="Manual Reset")
+                        .values(status=JobStatus.PENDING, msg="Manual Reset", updated_at=datetime.now(timezone.utc))
                     )
                     session.commit()
                     console.print(f"[green]Reset {res.rowcount} stuck jobs.[/green]")
@@ -709,7 +711,7 @@ class EditorialCLI:
                     res = session.execute(
                         update(model_class)
                         .where(model_class.status == JobStatus.FAILED)
-                        .values(status=JobStatus.PENDING, msg=None, attempts=0)
+                        .values(status=JobStatus.PENDING, msg=None, attempts=0, updated_at=datetime.now(timezone.utc))
                     )
                     session.commit()
                     console.print(f"[green]Retried {res.rowcount} jobs.[/green]")
@@ -768,7 +770,7 @@ class EditorialCLI:
                     res = session.execute(
                         update(MergeProposalModel)
                         .where(MergeProposalModel.status == JobStatus.PROCESSING)
-                        .values(status=JobStatus.PENDING, reasoning="Manual Reset")
+                        .values(status=JobStatus.PENDING, reasoning="Manual Reset", updated_at=datetime.now(timezone.utc))
                     )
                     session.commit()
                     console.print(f"[green]Reset {res.rowcount} stuck proposals.[/green]")
@@ -778,7 +780,7 @@ class EditorialCLI:
                     res = session.execute(
                         update(MergeProposalModel)
                         .where(MergeProposalModel.status == JobStatus.FAILED)
-                        .values(status=JobStatus.PENDING, reasoning=None)
+                        .values(status=JobStatus.PENDING, reasoning=None, updated_at=datetime.now(timezone.utc))
                     )
                     session.commit()
                     console.print(f"[green]Retried {res.rowcount} proposals.[/green]")
@@ -921,6 +923,7 @@ class EditorialCLI:
                 event.status = new_status
                 event.is_active = (new_status == EventStatus.PUBLISHED)
                 job.status = JobStatus.COMPLETED
+                job.updated_at = datetime.now(timezone.utc)
                 session.commit()
                 console.print(f"[green]✅ Set to {new_status.value}![/green]")
                 time.sleep(1)
