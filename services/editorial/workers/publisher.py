@@ -38,13 +38,14 @@ class NewsPublisherWorker:
         while True:
             try:
                 # Producer: Fetch Pending Jobs
-                await self._producer_cycle()
+                count = await self._producer_cycle()
                 
                 # Wait for the queue to drain before starting the next cycle
                 await self.queue.join()
                 
-                logger.info("✅ Cycle complete. Sleeping 60s...")
-                await asyncio.sleep(60)
+                if count == 0:
+                    logger.info("✅ Cycle complete. Sleeping 60s...")
+                    await asyncio.sleep(60)
 
             except Exception as e:
                 logger.error(f"Publisher Producer Error: {e}")
@@ -69,7 +70,7 @@ class NewsPublisherWorker:
             
             if not jobs:
                 logger.info("📭 No pending publish jobs.")
-                return
+                return 0
 
             logger.info(f"🔍 Enqueueing {len(jobs)} publish jobs...")
             
@@ -79,6 +80,7 @@ class NewsPublisherWorker:
                 await self.queue.put(job.id)
             
             session.commit()
+            return len(jobs)
 
     async def _consumer_loop(self, worker_id):
         while True:

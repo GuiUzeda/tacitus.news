@@ -32,8 +32,9 @@ def with_retry(max_retries=5, base_delay=30):
                     # Check for rate limit or transient errors
                     is_429 = "429" in msg or "resource_exhausted" in msg
                     is_503 = "503" in msg or "unavailable" in msg
+                    is_502 = "502" in msg or "bad gateway" in msg
 
-                    if is_429 or is_503:
+                    if is_429 or is_503 or is_502:
                         if attempt == max_retries - 1:
                             raise e # Re-raise on last attempt
                         
@@ -50,6 +51,8 @@ def with_retry(max_retries=5, base_delay=30):
                         
                         if is_429:
                             logger.warning(f"⚠️ API Rate Limit (429). Retrying in {wait:.2f}s...")
+                        elif is_502:
+                            logger.warning(f"⚠️ API Bad Gateway (502). Retrying in {wait:.2f}s...")
                         else:
                             logger.warning(f"⚠️ API Service Unavailable (503). Retrying in {wait:.2f}s...")
                         await asyncio.sleep(wait)
@@ -186,7 +189,7 @@ class CloudNewsFilter:
             logger.error(f"CloudNewsFilter JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return []
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"CloudNewsFilter Error: {e}")
             return []
@@ -315,7 +318,7 @@ class CloudNewsAnalyzer:
             logger.error(f"Event Verification Schema Error: {e}")
             return None
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"Event Verification Error: {e}")
             return None
@@ -397,7 +400,7 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return []
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"CloudNewsAnalyzer Error: {e}")
             return []
@@ -499,7 +502,7 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return None
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"CloudNewsAnalyzer Error: {e}")
             return None
@@ -573,7 +576,7 @@ class CloudNewsAnalyzer:
             logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return None 
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"Event summarization failed: {e}")
             return None
@@ -637,7 +640,7 @@ class CloudNewsAnalyzer:
             logger.error(f"Event Verification Schema Error: {e}")
             return None
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"Event Verification Error: {e}")
             return None 
@@ -718,7 +721,7 @@ class CloudNewsAnalyzer:
             logger.error(f"Event Verification Schema Error: {e}")
             return None
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e):
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
                 raise e
             logger.error(f"Event Verification Error: {e}")
             return None 
