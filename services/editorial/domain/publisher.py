@@ -89,10 +89,10 @@ class NewsPublisherDomain:
         
         # Decay Formula: 40 * (0.5 ^ (age / 12))
         # 0h = 40pts | 12h = 20pts | 24h = 10pts
-        if age_hours < 48:
+        if age_hours < 24:
             recency_score = self.RECENCY_MAX_BONUS * (0.5 ** (age_hours / self.RECENCY_HALFLIFE_HOURS))
             score += recency_score
-            if recency_score > 25: # Arbitrary threshold for "Breaking" tag
+            if recency_score > 70: # Arbitrary threshold for "Breaking" tag
                 insights.append("BREAKING")
         else:
              # Archive penalty for very old stuff

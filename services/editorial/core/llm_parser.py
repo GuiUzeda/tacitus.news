@@ -456,7 +456,7 @@ class CloudNewsAnalyzer:
         1. **High Information Density:** Do not use filler words. Every sentence must contain a fact, number, name, or location.
         2. **Journalistic Tone:** Neutral, objective, direct (AP/Reuters style).
         3. **No Introduction:** Do not say "The article says...". Just state the facts.
-        4. **Always answer in the SAME language that the article.**
+        4. **Language:** Output strictly in **PORTUGUESE (PT-BR)**.
     
         **STRUCTURE (Generate 4 to 5 bullet points):**
         - **Bullet 1 (The Lead):** The core event. Who, What, Where, When.
@@ -538,7 +538,7 @@ class CloudNewsAnalyzer:
         prev_summary_str = json.dumps(previous_summary) if previous_summary else "None (New Event)"
 
         prompt = f"""
-        You are a Senior Journalistic Editor.
+        You are a Senior Journalistic Editor in Brazil.
 
         **OBJECTIVE:**
         Synthesize the facts of a news event into a neutral, journalistic summary, categorize it, and assess its societal impact.
@@ -556,20 +556,20 @@ class CloudNewsAnalyzer:
         3. **Language:** Output strictly in **PORTUGUESE (PT-BR)**.
         4. **Handling Missing Sides:** If a side (Left/Right) has no sources, set it to empty string `""`.
 
-        **IMPACT SCORING RUBRIC (0-100):**
-        Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
-        - **0-30 (Noise):** Celebrity gossip, viral social media trends, minor crime with no wider implication.
-        - **31-60 (Routine):** Standard political statements, economic updates, sports results, entertainment releases.
-        - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
-        - **81-100 (Historic/Critical):** Wars, Constitutional crises, Pandemics, Assassinations of heads of state.
-
         **CATEGORIES:**
         Choose ONE: [POLITICS, ECONOMY, WORLD, TECH, SCIENCE, HEALTH, ENTERTAINMENT, SPORTS, CRIME, OTHER]
 
         **CRITICAL - TITLE RULES:**
         - The `title` must describe the **EVENT**, not your analysis.
         - **FORBIDDEN WORDS in Title:** "Análise", "Cobertura", "Visão", "Relatório".
-
+        
+        **IMPACT SCORING RUBRIC (0-100) - IMPORTANT!:**
+        Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
+        - **0-30 (Noise):** Celebrity gossip, viral social media trends, minor crime with no wider implication.
+        - **31-60 (Routine):** Standard political statements, economic updates, sports results, entertainment releases.
+        - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
+        - **81-100 (Historic/Critical):** Wars, Constitutional crises, Pandemics, Assassinations of heads of state.
+        
         **OUTPUT JSON SCHEMA:**
         {{
             "title": "Direct, active-voice headline.",

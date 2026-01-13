@@ -118,9 +118,11 @@ class EditorialCLI:
                 table = Table(show_header=True, header_style="bold blue")
                 table.add_column("#", width=3, style="dim")
                 table.add_column("Score", width=6, justify="right")
-                table.add_column("Edit.", width=4, justify="right", style="cyan")
+                table.add_column("Edit.", width=5, justify="right", style="cyan")
+                table.add_column("Imp.", width=5, justify="right", style="cyan")
                 table.add_column("Title")
                 table.add_column("Tags", style="magenta italic")
+                table.add_column("Published")
 
                 for i, e in enumerate(events):
                     tags = []
@@ -131,8 +133,10 @@ class EditorialCLI:
                         str(i+1),
                         f"{e.hot_score:.1f}",
                         f"{e.editorial_score:+.0f}" if e.editorial_score else "0",
+                        f"{e.ai_impact_score}" if e.ai_impact_score else "50",
                         e.title[:60],
-                        ", ".join(tags)
+                        ", ".join(tags),
+                         e.created_at.strftime("%Y-%m-%d") if e.created_at else "-",
                     )
                 console.print(table)
 
@@ -164,6 +168,7 @@ class EditorialCLI:
                 
                 console.print(f"Current Hot Score: [bold cyan]{event.hot_score:.2f}[/bold cyan] (Calc: {score:.2f})")
                 console.print(f"Editorial Boost: [bold yellow]{event.editorial_score}[/bold yellow]")
+                console.print(f"Impact Score: [bold yellow]{event.ai_impact_score}[/bold yellow] - {event.ai_impact_reasoning}")
                 console.print(f"Insights: {insights}")
                 
                 # --- MENU ---
@@ -373,7 +378,7 @@ class EditorialCLI:
         
         with SessionLocal() as session:
             events = session.scalars(
-                select(NewsEventModel).where(NewsEventModel.is_active == True)
+                select(NewsEventModel).where(NewsEventModel.is_active == True, NewsEventModel.status == EventStatus.PUBLISHED)
             ).all()
             
             console.print(f"Recalculating {len(events)} events...")

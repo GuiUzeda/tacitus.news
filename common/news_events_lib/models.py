@@ -146,7 +146,7 @@ class NewsEventModel(BaseModel):
     last_article_date = mapped_column(DateTime, nullable=True)
     # New Field: Semantic importance derived by LLM (0-100)
     ai_impact_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    
+    ai_impact_reasoning: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # Optional: Categorical classification for weighting!
     # e.g., "POLITICS", "ENTERTAINMENT", "SCIENCE", "CRIME"
     category_tag: Mapped[Optional[str]] = mapped_column(String, nullable=True)

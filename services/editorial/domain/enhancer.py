@@ -227,6 +227,7 @@ class NewsEnhancerDomain:
                 event.articles_at_last_summary = event.article_count
                 event.last_updated_at = datetime.now(timezone.utc)
                 event.ai_impact_score = event_summary.get("impact_score", 50) 
+                event.ai_impact_reasoning = event_summary.get("impact_reasoning", "") 
                 event.category_tag = event_summary.get("category", "GENERAL")
                 session.add(event)
 
@@ -243,7 +244,7 @@ class NewsEnhancerDomain:
         job.status = JobStatus.PENDING
         job.queue_name = EventsQueueName.PUBLISHER
         job.updated_at = datetime.now(timezone.utc)
-        logger.success(f"✅ Enhanced: {event.title} (Debounced: {should_skip_synthesis})")
+        logger.success(f"✅ Enhanced: {event.title} (Debounced: {should_skip_synthesis}, articles: {event.article_count}, impact:{event.ai_impact_score})")
 
     def _update_article_from_llm(self, article, result):
         article.main_topics = result.main_topics
