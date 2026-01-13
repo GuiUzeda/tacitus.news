@@ -137,8 +137,15 @@ class NewsPublisherDomain:
         elif total_sides == 1:
             dominant_side = list(sides.keys())[0]
             
+            # --- FIX: USE BASELINE ---
+            baseline_prob = self.BASELINE_BIAS.get(dominant_side, 0.33)
+            
+            # Boost logic: If baseline is LOW (e.g. 0.1), multiplier is HIGH (1.9)
+            # If baseline is HIGH (e.g. 0.6), multiplier is LOW (1.4)
+            blind_spot_multiplier = 1.0 + (1.0 - baseline_prob)
+
             if event.article_count >= self.MIN_ARTICLES_FOR_BLIND_SPOT:
-                score *= 1.5
+                score *= (1.2 * blind_spot_multiplier) # Scale boost by rarity
                 insights.append(f"ONLY_{dominant_side.upper()}")
                 insights.append("BLIND_SPOT")
             else:
