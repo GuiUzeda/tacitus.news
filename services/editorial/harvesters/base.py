@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import re
+import random
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from urllib.parse import urlparse, urljoin
@@ -47,7 +49,7 @@ class BaseHarvester:
             "Upgrade-Insecure-Requests": "1",
         }
 
-    async def harvest(self, session, sources: List[dict]) -> list[dict]:
+    async def harvest(self, session, sources: List[dict], ignore_hashes: set = None) -> list[dict]:
         """
         Orchestrator: Iterates sources, fetches data, and handles deduplication/merging.
         DO NOT OVERRIDE THIS in subclasses unless you want to change deduplication logic.
@@ -57,7 +59,7 @@ class BaseHarvester:
         for source in sources:
             # Delegate fetching to a method that subclasses can override
             try:
-                new_articles = await self.fetch_feed_articles(session, source)
+                new_articles = await self.fetch_feed_articles(session, source, ignore_hashes)
             except Exception as e:
                 logger.error(f"Feed process failed {source.get('url')}: {e}")
                 continue
@@ -72,7 +74,7 @@ class BaseHarvester:
 
         return list(unique_articles.values())
 
-    async def fetch_feed_articles(self, session, source: dict) -> List[dict]:
+    async def fetch_feed_articles(self, session, source: dict, ignore_hashes: set = None) -> List[dict]:
         """
         Strategy Implementation: Fetches articles based on feed type.
         Subclasses should override THIS to add custom logic (e.g. Sitemap Index by Date).
@@ -92,6 +94,7 @@ class BaseHarvester:
                     allowed_sections=source.get("allowed_sections"),
                     url_pattern=source.get("url_pattern"),
                     is_ranked=is_ranked,
+                    ignore_hashes=ignore_hashes,
                 )
             else:
                 return await self._fetch_from_html(
@@ -101,6 +104,7 @@ class BaseHarvester:
                     allowed_sections=source.get("allowed_sections"),
                     url_pattern=source.get("url_pattern"),
                     is_ranked=is_ranked,
+                    ignore_hashes=ignore_hashes,
                 )
         
         # 2. RSS
@@ -110,6 +114,7 @@ class BaseHarvester:
                 url,
                 blocklist=source.get("blocklist"),
                 allowed_sections=source.get("allowed_sections"),
+                ignore_hashes=ignore_hashes,
             )
 
         # 3. Standard Sitemap
@@ -119,25 +124,26 @@ class BaseHarvester:
                 url,
                 blocklist=source.get("blocklist"),
                 allowed_sections=source.get("allowed_sections"),
+                ignore_hashes=ignore_hashes,
             )
         
         # 4. Built-in Dynamic Sitemaps (New!)
         elif feed_type == "sitemap_index_id":
              # Assumes url_pattern contains the ID regex
              return await self.harvest_latest_id(
-                 session, url, id_pattern=source.get("url_pattern")
+                 session, url, id_pattern=source.get("url_pattern"), ignore_hashes=ignore_hashes
              )
              
         elif feed_type == "sitemap_index_date":
              # Assumes url_pattern contains the Date regex
              return await self.harvest_latest_date(
-                 session, url, date_pattern=source.get("url_pattern")
+                 session, url, date_pattern=source.get("url_pattern"), ignore_hashes=ignore_hashes
              )
         
         elif feed_type == "sitemap_index_date_id":
              # Assumes url_pattern contains a composite regex like (\d+-\d{4})
              return await self.harvest_latest_date_id(
-                 session, url, pattern=source.get("url_pattern")
+                 session, url, pattern=source.get("url_pattern"), ignore_hashes=ignore_hashes
              )
 
         return []
@@ -169,6 +175,7 @@ class BaseHarvester:
         allowed_sections=None,
         url_pattern=None,
         is_ranked=False,
+        ignore_hashes=None,
     ) -> List[dict]:
         """
         Fast Static HTML Fetch using aiohttp.
@@ -187,7 +194,7 @@ class BaseHarvester:
             return []
 
         return self._parse_html_links(
-            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked
+            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked, ignore_hashes
         )
 
     async def _fetch_from_html_browser(
@@ -198,6 +205,7 @@ class BaseHarvester:
         allowed_sections=None,
         url_pattern=None,
         is_ranked=False,
+        ignore_hashes=None,
     ) -> List[dict]:
         """
         Heavy Fetch using Playwright.
@@ -207,74 +215,84 @@ class BaseHarvester:
         logger.info(f"🎭 Browser Fetching: {url} (Scrolls: {scroll_depth})")
         
         async with async_playwright() as p:
-            # Launch without sandbox for Docker compatibility
-            # Ensure 'playwright install chromium' has been run in your Dockerfile
-            browser = await p.chromium.launch(
-                headless=True, 
-                args=[
-                        "--disable-blink-features=AutomationControlled", # CRÍTICO: Remove a flag 'navigator.webdriver'
+            for browser_name in ["chromium", "firefox"]:
+                try:
+                    browser_type = getattr(p, browser_name)
+                    # Chromium needs sandbox flags in Docker
+                    args = [
+                        "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-setuid-sandbox",
                         "--disable-infobars",
                         "--window-position=0,0",
-                        "--ignore-certifcate-errors",
-                        "--ignore-certifcate-errors-spki-list",
-                        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    ]
-            )
-            
-            context = await browser.new_context(
-                user_agent=self.headers["User-Agent"],
-                viewport={"width": 1280, "height": 800}
-            )
-            page = await context.new_page()
+                        "--ignore-certificate-errors",
+                        "--ignore-certificate-errors-spki-list",
+                    ] if browser_name == "chromium" else []
 
-            try:
-                # 1. Load Page
-                await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000) # Settle time
-
-                # 2. Close potential popups/overlays
-                try: 
-                    await page.keyboard.press("Escape")
-                except: 
-                    pass
-
-                # 3. Robust Interaction Loop (Scroll / Click Load More)
-                for i in range(scroll_depth):
-                    # Strategy A: Look for "Load More" buttons
+                    browser = await browser_type.launch(headless=True, args=args)
+                    
                     try:
-                        load_btn = page.get_by_role(
-                            "button", 
-                            name=re.compile(r"carregar mais|ver mais|leia mais|veja mais", re.IGNORECASE)
+                        if browser_name == "chromium":
+                            ua = random.choice(self.user_agents)
+                        else:
+                            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
+
+                        context = await browser.new_context(
+                            user_agent=ua,
+                            viewport={"width": 1280, "height": 800}
                         )
-                        if await load_btn.count() > 0 and await load_btn.first.is_visible():
-                            await load_btn.first.click(force=True)
-                            await page.wait_for_timeout(3000) # Give it time to load content
-                            continue 
-                    except: 
-                        pass
-                    
-                    # Strategy B: Keyboard Navigation (Works on overflow divs)
-                    await page.keyboard.press("End")
-                    await page.wait_for_timeout(500)
-                    
-                    # Strategy C: Mouse Wheel (Simulates human scroll)
-                    await page.mouse.wheel(0, 15000)
-                    await page.wait_for_timeout(2000)
+                        page = await context.new_page()
 
-                html_content = await page.content()
+                        # 1. Load Page
+                        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                        await page.wait_for_timeout(2000) # Settle time
 
-            except Exception as e:
-                logger.error(f"Browser Crash {url}: {e}")
-                await browser.close()
-                return []
+                        # 2. Close potential popups/overlays
+                        try: 
+                            await page.keyboard.press("Escape")
+                        except: 
+                            pass
 
-            await browser.close()
-            
-            return self._parse_html_links(
-                html_content, url, blocklist, allowed_sections, url_pattern, is_ranked
-            )
+                        # 3. Robust Interaction Loop (Scroll / Click Load More)
+                        for i in range(scroll_depth):
+                            # Strategy A: Look for "Load More" buttons
+                            try:
+                                load_btn = page.get_by_role(
+                                    "button", 
+                                    name=re.compile(r"carregar mais|ver mais|leia mais|veja mais", re.IGNORECASE)
+                                )
+                                if await load_btn.count() > 0 and await load_btn.first.is_visible():
+                                    await load_btn.first.click(force=True)
+                                    await page.wait_for_timeout(3000) # Give it time to load content
+                                    continue 
+                            except: 
+                                pass
+                            
+                            # Strategy B: Keyboard Navigation (Works on overflow divs)
+                            await page.keyboard.press("End")
+                            await page.wait_for_timeout(500)
+                            
+                            # Strategy C: Mouse Wheel (Simulates human scroll)
+                            await page.mouse.wheel(0, 15000)
+                            await page.wait_for_timeout(2000)
+
+                        html_content = await page.content()
+                        await browser.close()
+                        
+                        return self._parse_html_links(
+                            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked, ignore_hashes
+                        )
+
+                    except Exception as e:
+                        logger.warning(f"{browser_name.capitalize()} Crash {url}: {e}")
+                        await browser.close()
+                        continue
+
+                except Exception as e:
+                    logger.error(f"Browser Launch Failed ({browser_name}): {e}")
+                    continue
+        
+        return []
 
     def _parse_html_links(
         self, 
@@ -283,7 +301,8 @@ class BaseHarvester:
         blocklist, 
         allowed_sections, 
         url_pattern, 
-        is_ranked
+        is_ranked,
+        ignore_hashes=None
     ):
         """
         Shared logic to extract links from HTML content (Static or Browser).
@@ -300,6 +319,7 @@ class BaseHarvester:
         
         articles = []
         
+        rank_counter = 0
         for tag in soup.find_all("a", href=True):
             link_text = tag.get_text(strip=True)
             if not link_text or len(link_text) < 5: 
@@ -324,11 +344,17 @@ class BaseHarvester:
                     continue
 
             # 3. Rank Assignment
-            # If is_ranked=True, we trust the order of appearance on the homepage.
+            # We increment rank counter regardless of whether we skip the article (to preserve original order)
             rank = None
             if is_ranked:
-                rank = len(articles) + 1
+                rank_counter += 1
+                rank = rank_counter
             
+            # 4. Hash Check (Optimization)
+            url_hash = self._compute_hash(full_url)
+            if ignore_hashes and url_hash in ignore_hashes:
+                continue
+
             # Attempt to extract date from URL (heuristic)
             url_date = re.match(r"\d{4}-\d{2}-\d{2}|\d{4}/\d{2}/\d{2}", full_url)
 
@@ -339,6 +365,7 @@ class BaseHarvester:
                 "published": url_date, # Often None here; Trafilatura handles extraction later
                 "content": "Unknown",
                 "rank": rank, # CRITICAL: Used by Publisher for "Hot Score"
+                "hash": url_hash
             })
             seen_urls.add(full_url)
 
@@ -350,6 +377,7 @@ class BaseHarvester:
         url: str,
         blocklist=None,
         allowed_sections=None,
+        ignore_hashes=None,
     ) -> list[dict]:
         """ Standard Sitemap Fetcher (XML) """
         xml_content = None
@@ -397,6 +425,11 @@ class BaseHarvester:
             if not loc: continue
             link = loc.text.strip()
 
+            # 0. Hash Check
+            url_hash = self._compute_hash(link)
+            if ignore_hashes and url_hash in ignore_hashes:
+                continue
+
             # 1. Blocklist Check
             if to_block.search(link): continue
 
@@ -419,7 +452,8 @@ class BaseHarvester:
                 "source": base_domain,
                 "published": pub_date or (lastmod.text if lastmod else None),
                 "content": "Unknown",
-                "rank": None # Sitemaps have no editorial rank
+                "rank": None, # Sitemaps have no editorial rank
+                "hash": url_hash
             })
             
         if not allowed_sections: return articles
@@ -432,7 +466,7 @@ class BaseHarvester:
         return filtered
 
     async def harvest_rss(
-        self, session: aiohttp.ClientSession, url, blocklist=None, allowed_sections=None
+        self, session: aiohttp.ClientSession, url, blocklist=None, allowed_sections=None, ignore_hashes=None
     ) -> list[dict]:
         """ RSS Feed Fetcher (XML) """
         try:
@@ -464,6 +498,11 @@ class BaseHarvester:
             else:
                 link = link_tag.text.strip()
 
+            # Hash Check
+            url_hash = self._compute_hash(link)
+            if ignore_hashes and url_hash in ignore_hashes:
+                continue
+
             if to_block.search(link): continue
 
             title_obj = item.find("title")
@@ -485,7 +524,8 @@ class BaseHarvester:
                 "source": base_domain,
                 "published": pub_date_str,
                 "content": content,
-                "rank": None # RSS is usually reverse chronological, not editorial rank
+                "rank": None, # RSS is usually reverse chronological, not editorial rank
+                "hash": url_hash
             })
 
         if not allowed_sections: return articles
@@ -497,7 +537,7 @@ class BaseHarvester:
                 filtered.append(art)
         return filtered
 
-    async def harvest_latest_id(self, session, url, id_pattern, blocklist=None, allowed_sections=None):
+    async def harvest_latest_id(self, session, url, id_pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
         """ 
         Fetch sitemap index by numeric ID.
         Used for sites that rotate sitemaps by ID (e.g. sitemap-1234.xml).
@@ -532,9 +572,9 @@ class BaseHarvester:
         valid_locs.sort(key=lambda x: x[0], reverse=True)
         _, target_url = valid_locs[0]
         
-        return await self._fetch(session, target_url, blocklist, allowed_sections)
+        return await self._fetch(session, target_url, blocklist, allowed_sections, ignore_hashes)
 
-    async def harvest_latest_date(self, session, url, date_pattern, blocklist=None, allowed_sections=None):
+    async def harvest_latest_date(self, session, url, date_pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
         """ 
         Fetch sitemap index by Date string.
         Used for sites that rotate sitemaps by Date (e.g. sitemap-2026-01-12.xml).
@@ -567,7 +607,7 @@ class BaseHarvester:
         valid_locs.sort(key=lambda x: x[0], reverse=True)
         _, best_url = valid_locs[0]
 
-        return await self._fetch(session, best_url, blocklist, allowed_sections)
+        return await self._fetch(session, best_url, blocklist, allowed_sections, ignore_hashes)
 
     async def _fetch_text_browser(self, url: str) -> Optional[bytes]:
         """Fallback: Fetch raw content using Playwright."""
@@ -583,20 +623,27 @@ class BaseHarvester:
                         "--disable-setuid-sandbox",
                         "--disable-infobars",
                         "--window-position=0,0",
-                        "--ignore-certifcate-errors",
-                        "--ignore-certifcate-errors-spki-list",
-                        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    ] 
+                        "--ignore-certificate-errors",
+                        "--ignore-certificate-errors-spki-list",
+                    ] if browser_name == "chromium" else []
+                       
                         
                         browser = await browser_type.launch(headless=True, args=args)
-                        
+
                         try:
+                            # Fix typo in UA string (removed trailing ') and match browser
+                            if browser_name == "chromium":
+                                ua = random.choice(self.user_agents)
+                            else:
+                                ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
+
                             context = await browser.new_context(
-                                user_agent=self.user_agents[0],
+                                user_agent=ua,
                                 viewport={"width": 1280, "height": 800}
                             )
                             page = await context.new_page()
 
+                            logger.info(f"🎭 {browser_name.capitalize()} navigating to {url}...")
                             response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
                             
                             status = 0
@@ -617,7 +664,7 @@ class BaseHarvester:
         
         return None
 
-    async def harvest_latest_date_id(self, session, url, pattern, blocklist=None, allowed_sections=None):
+    async def harvest_latest_date_id(self, session, url, pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
         """ 
         Fetch sitemap index with composite ID (e.g. 10-2024).
         Splits by '-' and sorts by (Year, ID) descending.
@@ -656,4 +703,7 @@ class BaseHarvester:
         valid_locs.sort(key=lambda x: x[0], reverse=True)
         _, best_url = valid_locs[0]
 
-        return await self._fetch(session, best_url, blocklist, allowed_sections)
+        return await self._fetch(session, best_url, blocklist, allowed_sections, ignore_hashes)
+
+    def _compute_hash(self, url: str) -> str:
+        return hashlib.md5(url.split("?")[0].encode()).hexdigest()

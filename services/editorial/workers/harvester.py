@@ -4,6 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import List
 from loguru import logger
@@ -29,10 +30,11 @@ class HarvesterWorker:
         )
         
         # Instantiate Domain (manages ProcessPool)
-        self.domain = HarvestingDomain(max_cpu_workers=3)
+        self.domain = HarvestingDomain(max_cpu_workers=1)
+        self.worker_id = str(uuid.uuid4())[:8]
         
     async def run(self):
-        logger.info("🌾 Harvester Worker Started.")
+        logger.info(f"🌾 Harvester Worker Started. ID: {self.worker_id}")
         
         # Warmup CPU workers (Load AI Models) before taking any jobs
         await asyncio.to_thread(self.domain.warmup)
@@ -47,11 +49,11 @@ class HarvesterWorker:
                 # 1. Fetch Configuration (IO Bound)
                 newspapers = self._get_active_newspapers()
                 if not newspapers:
-                    logger.warning("No active newspapers found. Sleeping...")
+                    logger.warning(f"[{self.worker_id}] No active newspapers found. Sleeping...")
                     await asyncio.sleep(300)
                     continue
 
-                logger.info(f"Starting Cycle for {len(newspapers)} newspapers...")
+                logger.info(f"[{self.worker_id}] Starting Cycle for {len(newspapers)} newspapers...")
 
                 # 2. Shared HTTP Session for the cycle
                 async with aiohttp.ClientSession() as http_session:
@@ -66,21 +68,21 @@ class HarvesterWorker:
                     ]
                     await asyncio.gather(*tasks)
 
-                logger.success("Cycle Finished.")
+                logger.success(f"[{self.worker_id}] Cycle Finished.")
                 
                 # Sleep to align with hourly schedule (1 hour after START)
                 elapsed = (datetime.now() - cycle_start_time).total_seconds()
                 sleep_duration = max(0, 3600 - elapsed)
-                logger.info(f"Sleeping {sleep_duration:.0f}s to align with hourly schedule...")
+                logger.info(f"[{self.worker_id}] Sleeping {sleep_duration:.0f}s to align with hourly schedule...")
                 await asyncio.sleep(sleep_duration)
 
             except Exception as e:
-                logger.critical(f"Harvester Cycle Crashed: {e}")
+                logger.critical(f"[{self.worker_id}] Harvester Cycle Crashed: {e}")
                 await asyncio.sleep(60)
 
     async def _process_wrapper(self, sem, http_session, np_data):
         async with sem:
-            logger.info(f"[{np_data['name']}] 🗞️  Processing Newspaper...")
+            logger.info(f"[{self.worker_id}] [{np_data['name']}] 🗞️  Processing Newspaper...")
 
             # We open a NEW DB session per newspaper to keep transactions short
             # and avoid "idle in transaction" issues during long http requests
@@ -90,7 +92,7 @@ class HarvesterWorker:
                         session, http_session, np_data
                     )
                     if count > 0:
-                        logger.success(f"[{np_data['name']}] Cycle finished. Total {count} articles saved.")
+                        logger.success(f"[{self.worker_id}] [{np_data['name']}] Cycle finished. Total {count} articles saved.")
                     else:
                         session.rollback()
                 except Exception:

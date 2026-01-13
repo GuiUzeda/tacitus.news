@@ -1,5 +1,6 @@
-import requests
-import time
+import asyncio
+import aiohttp
+from playwright.async_api import async_playwright
 
 url = "https://noticias.uol.com.br/sitemap/v2/news-01.xml"
 user_agents = [
@@ -16,20 +17,59 @@ user_agents = [
             "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
         ]
 
-for user_agent in user_agents:
+async def fallback_playwright(target_url, agent):
+    print(f"   [Playwright] 🎭 Triggering fallback...")
+    try:
+        async with async_playwright() as p:
+       
+            browser = await p.firefox.launch(
+                headless=True,
+                args=[]
+            )
+            context = await browser.new_context(user_agent=agent)
+            page = await context.new_page()
+            
+            response = await page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+            
+            status = 0
+            if response:
+                status = response.status if isinstance(response.status, int) else response.status()
+            
+            if status == 200 and response:
+                content = await response.body()
+                print(f"   [Playwright] ✅ Success! Status: 200 | Size: {len(content)} bytes")
+            else:
+                print(f"   [Playwright] ❌ Failed. Status: {status}")
+                
+            await browser.close()
+    except Exception as e:
+        print(f"   [Playwright] 💥 Crash: {e}")
 
-    headers = {
-        # This is the "Magic Key". We pretend to be Google's crawler.
-        "User-Agent":user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.google.com/",
-        "Upgrade-Insecure-Requests": "1",
-    }
-# Add a delay if you are running this in a loop!
-    
+async def main():
+    async with aiohttp.ClientSession() as session:
+        for user_agent in user_agents:
 
-    response = requests.get(url, headers=headers)
+            headers = {
+                # This is the "Magic Key". We pretend to be Google's crawler.
+                "User-Agent":user_agent,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://www.google.com/",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        # Add a delay if you are running this in a loop!
+            
+            print(f"Testing UA: {user_agent[:40]}...")
+            try:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    print(f"   [Requests] Status: {response.status}")
+                    if response.status != 200:
+                        await fallback_playwright(url, user_agent)
+            except Exception as e:
+                print(f"   [Requests] Error: {e}")
+                await fallback_playwright(url, user_agent)
+                
+            await asyncio.sleep(2)
 
-    print(user_agent, response.status_code)  # Should be 200
-    time.sleep(2)
+if __name__ == "__main__":
+    asyncio.run(main())

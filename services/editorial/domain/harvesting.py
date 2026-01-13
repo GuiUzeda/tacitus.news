@@ -79,8 +79,10 @@ def _process_entry_cpu_task(html: str, entry: dict, newspaper_id: UUID) -> Optio
         all_entities = list(set(tags + flat_interests))[:15]
 
         clean_link = entry["link"]
-        link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
-
+        link_hash = entry.get("hash")
+        if not link_hash:
+            link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
+            
         return {
             "title": data.get("title") or entry.get("title"),
             "link": clean_link,
@@ -259,7 +261,7 @@ class HarvestingDomain:
             ):
                 batch.append(article_data)
                 
-                # Save in small batches (e.g. 5) to yield results quickly
+                # Save immediately to yield results as soon as possible
                 if len(batch) >= 5:
                     saved_objs = self._bulk_save_articles(session, batch)
                     if saved_objs:
@@ -287,7 +289,8 @@ class HarvestingDomain:
     async def _run_pipeline(self, http_session, feeds, harvester, name, np_id, ignore_hashes):
         # A. Fetch Links (Uses the new BaseHarvester with Browser/Regex support)
         try:
-            raw_entries = await harvester.harvest(http_session, feeds)
+            # Pass ignore_hashes to filter at source (BaseHarvester)
+            raw_entries = await harvester.harvest(http_session, feeds, ignore_hashes)
         except Exception as e:
             logger.error(f"[{name}] Link fetch failed: {e}")
             return
@@ -300,19 +303,16 @@ class HarvestingDomain:
         
         async def _process_entry(entry):
             clean_link = entry["link"]
-            link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
+            # Hash check is now done in BaseHarvester, so we assume entry is new.
             
-            if link_hash in ignore_hashes: return None
-
             html = None
-            async with io_semaphore:
+            try:
                 headers = self.base_headers.copy()
                 headers["User-Agent"] = self.USER_AGENTS[0] 
-                try:
-                    timeout = aiohttp.ClientTimeout(total=45)
-                    async with http_session.get(clean_link, headers=headers, timeout=timeout) as resp:
-                        if resp.status == 200: html = await resp.text()
-                except: pass
+                timeout = aiohttp.ClientTimeout(total=45)
+                async with http_session.get(clean_link, headers=headers, timeout=timeout) as resp:
+                    if resp.status == 200: html = await resp.text()
+            except: pass
 
             if not html: return None
 
