@@ -55,17 +55,17 @@ class NewsPublisherDomain:
         # 3. Quality Gates
         is_breaking = "BREAKING" in insights
         is_blind_spot = "BLIND_SPOT" in insights
-        
+        is_high_impact = "HIGH_IMPACT" in insights
         # Gate: "Soft News" requires more volume
         is_soft_news = any(t in event_topics for t in ["Lifestyle", "Entertainment", "Nature", "Sports"])
         
-        if is_soft_news and not is_breaking and event.article_count < 5:
+        if is_soft_news and not (is_breaking or is_high_impact) and event.article_count < 5:
              job.status = JobStatus.WAITING
              job.msg = "Soft News: Low Volume"
              return False
 
         # Standard Volume Gate
-        if not (is_breaking or is_blind_spot) and event.article_count < 2:
+        if not (is_breaking or is_blind_spot or is_high_impact) and event.article_count < 2:
             job.status = JobStatus.WAITING
             job.msg = "Low Volume: Waiting"
             return False
@@ -114,7 +114,14 @@ class NewsPublisherDomain:
                 #      best_multiplier = mult
             
             score *= best_multiplier
-
+        impact = event.ai_impact_score or 50 # Default to neutral if missing
+        
+        # Normalize impact (0-100) to a multiplier (e.g., 0.5x to 2.0x)
+        # Impact 20 (Gossip) -> 0.6x multiplier
+        # Impact 90 (War) -> 1.8x multiplier
+        semantic_multiplier = 0.4 + (impact / 100 * 1.6)
+        
+        score *= semantic_multiplier
         # 2. Clickbait Penalty (From clickbait_distribution)
         # clickbait_distribution is {"left": 0.8, "center": 0.2}
         if event.clickbait_distribution:
@@ -124,7 +131,10 @@ class NewsPublisherDomain:
                 if avg_clickbait > self.CLICKBAIT_PENALTY_THRESHOLD:
                     score *= 0.7 
                     insights.append("CLICKBAIT_RISK")
-
+        if impact >= 85:
+            insights.append("HIGH_IMPACT")
+        elif impact <= 30:
+            insights.append("LOW_IMPACT")
         # --- C. SPECTRUM ANALYSIS ---
         bias_counts = event.article_counts_by_bias or {}
         sides = {k: v for k, v in bias_counts.items() if k in ['left', 'center', 'right'] and v > 0}

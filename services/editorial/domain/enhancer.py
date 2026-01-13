@@ -226,6 +226,8 @@ class NewsEnhancerDomain:
                 event.last_summarized_at = datetime.now(timezone.utc)
                 event.articles_at_last_summary = event.article_count
                 event.last_updated_at = datetime.now(timezone.utc)
+                event.ai_impact_score = event_summary.get("impact_score", 50) 
+                event.category_tag = event_summary.get("category", "GENERAL")
                 session.add(event)
 
         # --- PHASE 6: Transition & Race Condition Check ---

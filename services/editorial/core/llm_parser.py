@@ -539,22 +539,32 @@ class CloudNewsAnalyzer:
 
         prompt = f"""
         You are a Senior Journalistic Editor.
-        
+
         **OBJECTIVE:**
-        Synthesize the facts of a news event into a neutral, journalistic summary.
-        
+        Synthesize the facts of a news event into a neutral, journalistic summary, categorize it, and assess its societal impact.
+
         **INPUT DATA:**
         [NEW ARTICLES]:
         {context_str[:25000]}
-        
+
         [EXISTING DATA]:
         {prev_summary_str[:5000]}
-        
+
         **TASK INSTRUCTIONS:**
         1. **Synthesis:** Merge new facts with existing data. Prioritize recent updates.
         2. **Bias Detection:** Look for omissions. What facts are specific sides ignoring?
         3. **Language:** Output strictly in **PORTUGUESE (PT-BR)**.
         4. **Handling Missing Sides:** If a side (Left/Right) has no sources, set it to empty string `""`.
+
+        **IMPACT SCORING RUBRIC (0-100):**
+        Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
+        - **0-30 (Noise):** Celebrity gossip, viral social media trends, minor crime with no wider implication.
+        - **31-60 (Routine):** Standard political statements, economic updates, sports results, entertainment releases.
+        - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
+        - **81-100 (Historic/Critical):** Wars, Constitutional crises, Pandemics, Assassinations of heads of state.
+
+        **CATEGORIES:**
+        Choose ONE: [POLITICS, ECONOMY, WORLD, TECH, SCIENCE, HEALTH, ENTERTAINMENT, SPORTS, CRIME, OTHER]
 
         **CRITICAL - TITLE RULES:**
         - The `title` must describe the **EVENT**, not your analysis.
@@ -564,6 +574,9 @@ class CloudNewsAnalyzer:
         {{
             "title": "Direct, active-voice headline.",
             "subtitle": "Contextual explanation.",
+            "category": "One of the categories above.",
+            "impact_reasoning": "Explain WHY you chose this score based on the rubric.",
+            "impact_score": 50,
             "summary": {{
                 "left": "Markdown bullet points... OR \"\"",
                 "right": "Markdown bullet points... OR \"\"",
@@ -571,10 +584,10 @@ class CloudNewsAnalyzer:
                 "bias": "Meta-analysis of the NARRATIVE."
             }}
         }}
-        
+
         Answer ONLY the VALID JSON.
         """
-  
+        
         response = None
         try:
             response = await client.aio.models.generate_content(
