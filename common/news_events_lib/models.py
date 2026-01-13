@@ -92,7 +92,7 @@ class NewsEventModel(BaseModel):
         JSONB, default=dict, nullable=True
     )
     
-    article_count: Mapped[int] = mapped_column(Integer, default=1)
+    article_count: Mapped[int] = mapped_column(Integer, default=1, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

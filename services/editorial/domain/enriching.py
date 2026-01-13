@@ -182,7 +182,7 @@ class EnrichingDomain:
                                 ctype = resp.headers.get("Content-Type", "").lower()
                                 if "text" not in ctype and "html" not in ctype and "json" not in ctype:
                                     logger.warning(f"Skipping non-text content {article.id}: {ctype}")
-                                    job.status = JobStatus.FAILED
+                                    job.status = JobStatus.COMPLETED
                                     job.msg = f"Skipped Content-Type: {ctype}"
                                     return
 
