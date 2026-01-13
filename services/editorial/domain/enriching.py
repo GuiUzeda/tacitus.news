@@ -210,7 +210,7 @@ class EnrichingDomain:
                 # Offload CPU task
                 result = await loop.run_in_executor(
                     self.cpu_executor,
-                    partial(_process_content_cpu_task, html, article.title, article.summary)
+                    partial(_process_content_cpu_task, str(html), article.title, article.summary)
                 )
 
                 if result:
