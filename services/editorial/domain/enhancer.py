@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 from sqlalchemy import select, or_, exists
@@ -25,6 +25,9 @@ class NewsEnhancerDomain:
         self.enhancer = CloudNewsAnalyzer()
         # Semaphore to limit concurrent heavy LLM batches across threads/tasks
         self.semaphore = asyncio.Semaphore(concurrency_limit)
+        
+        # CONFIG
+        self.DEBOUNCE_MINUTES = 10  # Don't re-summarize if updated < 10 mins ago
 
     async def enhance_event_job(self, session: Session, job: EventsQueueModel):
         """
@@ -78,9 +81,8 @@ class NewsEnhancerDomain:
 
                 for article in batch:
                     if article.contents and article.contents[0].content:
-                        # Truncate to ~6k chars to fit multiple articles in context
-                        clean_content = article.contents[0].content[:6000]
-                        batch_texts.append(f"{article.title}\n\n{clean_content}")
+                        # Truncate handled by CloudNewsAnalyzer.smart_truncate internally now
+                        batch_texts.append(f"{article.title}\n\n{article.contents[0].content}")
                         valid_articles.append(article)
 
                 if not batch_texts:
@@ -142,6 +144,17 @@ class NewsEnhancerDomain:
         # If job is newer than last summary, it implies a Merge or Manual trigger occurred
         has_external_update = job_updated > last_sum
 
+        # IMPROVEMENT: Debounce Check
+        # If summarized very recently, we SKIP Phase 5 (Synthesis) unless it's a "First Summary"
+        should_skip_synthesis = False
+        now = datetime.now(timezone.utc)
+        time_since_last = now - last_sum
+        
+        if event.summary and time_since_last < timedelta(minutes=self.DEBOUNCE_MINUTES):
+             # Debounce active: We gathered stats (Phase 1), but we won't rewrite the summary text.
+             logger.info(f"⏳ Debouncing Synthesis for '{event.title}' (Last sum: {time_since_last.seconds}s ago)")
+             should_skip_synthesis = True
+
         if not summary_inputs and not has_external_update:
             # Nothing new to do
             if event.article_count > 0:
@@ -154,7 +167,7 @@ class NewsEnhancerDomain:
 
         # --- PHASE 3: Gather Context from Merges ---
         force_context_fetch = False
-        if has_external_update:
+        if has_external_update and not should_skip_synthesis:
             # Fetch summaries from events recently merged into this one
             stmt_merges = select(NewsEventModel).where(
                 NewsEventModel.merged_into_id == event.id,
@@ -177,7 +190,7 @@ class NewsEnhancerDomain:
 
         # --- PHASE 4: Fallback Context ---
         # If we need to re-summarize but have no *new* inputs, fetch *recent* articles
-        if (not summary_inputs or force_context_fetch) and has_external_update:
+        if (not summary_inputs or force_context_fetch) and has_external_update and not should_skip_synthesis:
             stmt_ctx = (
                 select(ArticleModel)
                 .filter(ArticleModel.event_id == event.id)
@@ -199,7 +212,7 @@ class NewsEnhancerDomain:
         session.add(event)
         session.flush()  # Ensure aggregations are visible
 
-        if summary_inputs:
+        if summary_inputs and not should_skip_synthesis:
             logger.info(
                 f"Summarizing Event {event.id} with {len(summary_inputs)} inputs."
             )
@@ -228,7 +241,7 @@ class NewsEnhancerDomain:
         job.status = JobStatus.PENDING
         job.queue_name = EventsQueueName.PUBLISHER
         job.updated_at = datetime.now(timezone.utc)
-        logger.success(f"✅ Enhanced: {event.title}")
+        logger.success(f"✅ Enhanced: {event.title} (Debounced: {should_skip_synthesis})")
 
     def _update_article_from_llm(self, article, result):
         article.main_topics = result.main_topics

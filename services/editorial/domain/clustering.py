@@ -202,10 +202,10 @@ class NewsCluster:
         # Se o alvo já estava publicado, força re-publicação para atualizar Hot Score e Posição
         if target_event.status == EventStatus.PUBLISHED:
             logger.info(f"🔄 Re-Queueing Published Event: {target_event.title}")
-            self._trigger_event_publisher(session, target_event.id)
-        else:
-            # Fluxo normal: vai para o Enhancer (Resumo/LLM)
-            self._trigger_event_enhancement(session, target_event.id)
+
+      
+        # Fluxo normal: vai para o Enhancer (Resumo/LLM) -> publisher
+        self._trigger_event_enhancement(session, target_event.id)
 
     # --- HELPERS DE FILA ---
 

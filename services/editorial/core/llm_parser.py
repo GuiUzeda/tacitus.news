@@ -199,6 +199,21 @@ class CloudNewsAnalyzer:
         # The "Senior" Model
         self.model_id = "gemma-3-27b-it"
     
+    def _smart_truncate(self, text: str, limit: int = 6000) -> str:
+        """
+        Truncates text while preserving the beginning (Lead) and the end (Conclusion).
+        Strategy: 70% Head, 30% Tail.
+        """
+        if not text or len(text) <= limit:
+            return text
+        
+        head_len = int(limit * 0.7)
+        tail_len = int(limit * 0.3)
+        
+        # Ensure we don't overlap if limit is weirdly small vs text length, 
+        # though the strict check above handles mostly.
+        return f"{text[:head_len]}\n\n[...TRUNCATED SECTIONS...]\n\n{text[-tail_len:]}"
+
     @with_retry(max_retries=5, base_delay=30)
     async def analyze_articles_batch(self, texts: List[str]) -> List[LLMNewsOutputSchema]:
         """
@@ -207,9 +222,8 @@ class CloudNewsAnalyzer:
         # Prepare the combined text
         combined_input = ""
         for i, text in enumerate(texts):
-            # LIMIT CONTEXT: Most news logic is in the first 6k chars. 
-            # 25k is excessive and burns tokens on footers/comments.
-            clean_text = text[:6000] 
+            # IMPROVEMENT: Use Smart Truncation
+            clean_text = self._smart_truncate(text, 6000)
             combined_input += f"\n\n--- ARTICLE {i} ---\n{clean_text}"
 
         prompt = f"""
@@ -429,6 +443,10 @@ class CloudNewsAnalyzer:
     @with_retry(max_retries=5, base_delay=30)
     async def analyze_article(self, text: str) -> LLMNewsOutputSchema | None:
         today_context = datetime.now().strftime("%A, %d de %B de %Y")
+        
+        # IMPROVEMENT: Use Smart Truncation here too
+        truncated_text = self._smart_truncate(text, 25000)
+
         prompt = f"""
         You are an Intelligence Analyst for a geopolitical briefing service.
         
@@ -449,7 +467,7 @@ class CloudNewsAnalyzer:
         
         Input Context:
         Today is: {today_context}
-        Article Text: {text[:25000]}
+        Article Text: {truncated_text}
         
         **OUTPUT JSON SCHEMA:**
         {{

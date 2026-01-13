@@ -61,7 +61,7 @@ class EditorialCLI:
             console.print("[6] Recalculate ALL Scores")
             console.print("[7] Find & Merge Duplicates")
             
-            console.print("\n[q] Quit")
+            console.print("\nq: Quit")
 
             choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "6", "7", "q"])
 
@@ -136,7 +136,7 @@ class EditorialCLI:
                     )
                 console.print(table)
 
-                console.print("\n[bold]Select # to manage[/bold] or [q] Back")
+                console.print("\n[bold]Select # to manage[/bold] or q Back")
                 choice = Prompt.ask("Selection")
                 
                 if choice == "q": return
@@ -169,8 +169,8 @@ class EditorialCLI:
                 # --- MENU ---
                 console.print("\n[bold green]b[/bold green] : Boost (+10)    [bold red]d[/bold red] : Demote (-10)")
                 console.print("[bold red]k[/bold red] : KILL (Archive)  [bold cyan]e[/bold cyan] : Edit Title")
-                console.print("[i] : Inspect Content")
-                console.print("[q] : Back")
+                console.print("i : Inspect Content")
+                console.print("q : Back")
                 
                 action = Prompt.ask("Action").lower()
                 
@@ -225,7 +225,8 @@ class EditorialCLI:
             with SessionLocal() as session:
                 events = session.scalars(
                     select(NewsEventModel)
-                    .where(NewsEventModel.status == EventStatus.WAITING)
+                    .join(EventsQueueModel, NewsEventModel.id == EventsQueueModel.event_id)
+                    .where(EventsQueueModel.status == JobStatus.WAITING)
                     .order_by(desc(NewsEventModel.created_at))
                 ).all()
                 
@@ -244,7 +245,7 @@ class EditorialCLI:
                     table.add_row(str(i+1), e.title[:60], reason)
                 
                 console.print(table)
-                console.print("\nSelect # to Approve, [k] to Kill, [q] Back")
+                console.print("\nSelect # to Approve, k to Kill, q Back")
                 
                 choice = Prompt.ask("Action")
                 if choice == "q": return
@@ -325,8 +326,8 @@ class EditorialCLI:
             console.print("\n[1] Retry ALL Failed Jobs")
             console.print("[2] Reset ALL 'Processing' (Stuck) Jobs")
             console.print("[3] Clear ALL Completed Jobs")
-            console.print("[r] Refresh")
-            console.print("[q] Back")
+            console.print("r Refresh")
+            console.print("q Back")
 
             choice = Prompt.ask("Action")
             if choice == "q": return
@@ -384,15 +385,189 @@ class EditorialCLI:
             time.sleep(1)
 
     # --- Utility Wrappers for previous methods ---
-    def manual_search(self):
-        # (Reuse logic from your previous file)
-        pass 
+    def manual_search(self, article=None):
+        console.clear()
+        console.rule("🔎 Manual Search & Link")
+
+        with SessionLocal() as session:
+            target_date = None
+            if not article:
+                query = Prompt.ask("Enter search query")
+                vector = self.nlp_service.calculate_vector(query)
+            else:
+                article_db = session.get(ArticleModel, article.id)
+                if not article_db: return False
+                console.print(f"Searching for: [cyan]{article_db.title}[/cyan]")
+                query = Prompt.ask("Refine Query", default=self.cluster_service.derive_search_query(article_db))
+                vector = article_db.embedding
+                # Use article date to scope search
+                target_date = article_db.published_date
+
+            # Updated call to match Domain Service signature (passing date if available)
+            results = self.cluster_service.search_news_events_hybrid(
+                session, 
+                query, 
+                vector, 
+                target_date=target_date if target_date else datetime.now(timezone.utc),
+                limit=10
+            )
+            
+            table = Table(title=f"Results for '{query}'")
+            table.add_column("#"); table.add_column("Event"); table.add_column("Score")
+            candidates = []
+            for i, (event, rrf, _) in enumerate(results):
+                candidates.append(event)
+                table.add_row(str(i + 1), event.title, f"{rrf:.3f}")
+            console.print(table)
+
+            if article:
+                choice = Prompt.ask("Link to Event # (or Enter to cancel)")
+                if not choice.isdigit(): return False
+                idx = int(choice) - 1
+                if 0 <= idx < len(candidates):
+                    target = candidates[idx]
+                    
+                    art_db = session.get(ArticleModel, article.id)
+                    ev_db = session.get(NewsEventModel, target.id)
+                    
+                    self.cluster_service.execute_merge_action(session, art_db, ev_db)
+                    session.commit()
+                    console.print(f"[green]Linked to {target.title}![/green]")
+                    time.sleep(1)
+                    return True
+        return False
+
     def merge_duplicate_events(self):
-        # (Reuse logic from your previous file)
-        pass
+        console.clear()
+        console.rule("🔗 Find & Merge Duplicate Events")
+        target_query = Prompt.ask("Search for the MAIN Event (Title)")
+        with SessionLocal() as session:
+            targets = session.query(NewsEventModel).filter(
+                NewsEventModel.title.ilike(f"%{target_query}%"),
+                NewsEventModel.is_active == True
+            ).limit(10).all()
+            
+            if not targets:
+                console.print("[red]No events found.[/red]")
+                time.sleep(2); return
+
+            table = Table(title="Select Target Event"); table.add_column("#"); table.add_column("Title")
+            for i, e in enumerate(targets): table.add_row(str(i + 1), e.title)
+            console.print(table)
+            sel = IntPrompt.ask("Select #", default=1)
+            target_event = targets[sel - 1]
+
+            console.print(f"\n🔎 Searching duplicates for: [bold]{target_event.title}[/bold]...")
+            results = self.cluster_service.search_news_events_hybrid(
+                session, 
+                target_event.search_text or target_event.title, 
+                target_event.embedding_centroid, 
+                target_date=target_event.created_at,
+                limit=20
+            )
+            candidates = [r[0] for r in results if r[0].id != target_event.id]
+            if not candidates:
+                console.print("[green]No duplicates![/green]"); time.sleep(2); return
+
+            table = Table(title="Potential Duplicates"); table.add_column("#"); table.add_column("Title")
+            for i, ev in enumerate(candidates): table.add_row(str(i + 1), ev.title)
+            console.print(table)
+
+            choice = Prompt.ask("Select to merge (e.g. '1,3') or 'all'")
+            indices = []
+            if choice == "all": indices = range(len(candidates))
+            else: 
+                try: indices = [int(x.strip()) - 1 for x in choice.split(",") if x.strip()]
+                except: return
+
+            if Confirm.ask(f"⚠️ Merge {len(indices)} events?"):
+                for idx in indices:
+                    if 0 <= idx < len(candidates):
+                        self.cluster_service.execute_event_merge(session, candidates[idx], target_event)
+                session.commit()
+                console.print("[green]Merged![/green]")
+                time.sleep(2)
     def _inspect_event_deep_dive(self, event_id):
-        # (Reuse logic from your previous file)
-        pass
+        while True:
+            console.clear()
+            with SessionLocal() as session:
+                event = (
+                    session.query(NewsEventModel)
+                    .options(
+                        joinedload(NewsEventModel.articles).joinedload(
+                            ArticleModel.contents
+                        )
+                    )
+                    .get(event_id)
+                )
+                if not event:
+                    return
+
+                console.rule(f"[bold blue]EVENT INSPECTOR[/bold blue]")
+                console.print(f"[bold size=14]{event.title}[/bold size=14]")
+                console.print(f"ID: {event.id} | Articles: {len(event.articles)}")
+
+                if event.summary:
+                    sum_text = str(event.summary)
+                    if isinstance(event.summary, dict):
+                        sum_text = event.summary.get("center", "") or event.summary.get(
+                            "bias", ""
+                        )
+                    console.print(
+                        Panel(sum_text, title="Summary", border_style="green")
+                    )
+
+                table = Table(title="Linked Articles", show_header=True)
+                table.add_column("#", width=4)
+                table.add_column("Title")
+                table.add_column("Date")
+                sorted_articles = sorted(
+                    event.articles,
+                    key=lambda x: x.published_date or datetime.min,
+                    reverse=True,
+                )
+                for i, art in enumerate(sorted_articles):
+                    table.add_row(
+                        str(i + 1),
+                        art.title,
+                        str(art.published_date.date() if art.published_date else "?"),
+                    )
+                console.print(table)
+
+                console.print(
+                    "\n[blue]#[/blue] Read Article - #   [green]b[/green] Back - b "
+                )
+                choice = Prompt.ask("Action").lower()
+                if choice == "b":
+                    return
+                if choice.isdigit() and 1 <= int(choice) <= len(sorted_articles):
+                    self._read_article_content(sorted_articles[int(choice) - 1])
+
+    def _read_article_content(self, article):
+        console.clear()
+        console.rule(f"Reading: {article.title}")
+        
+        console.print(
+            f"[link={article.original_url}]{article.original_url}[/link]", 
+            style="blue underline", 
+            no_wrap=True, 
+            overflow="ignore"
+        )
+        print() 
+
+        content_text = "No content found."
+        with SessionLocal() as session:
+            fresh_article = session.get(ArticleModel, article.id)
+            if fresh_article and fresh_article.contents:
+                content_text = fresh_article.contents[0].content
+            
+            if fresh_article and fresh_article.summary:
+                console.print(Panel(fresh_article.summary, title="Summary"))
+            
+            console.print(Markdown(content_text))
+            
+        Prompt.ask("\nPress Enter...")
+
 
 if __name__ == "__main__":
     cli = EditorialCLI()

@@ -30,7 +30,7 @@ class NewsPublisherDomain:
         self.TOPIC_MULTIPLIERS = {
             "Politics": 1.5, "Economy": 1.4, "World": 1.3, "Crime": 1.2,
             "Science": 0.8, "Technology": 0.9, "Entertainment": 0.6,
-            "Sports": 0.5, "Lifestyle": 0.4, "Nature": 0.4, "Oddities": 0.3
+            "Sports": 0.5, "Lifestyle": 0.4, "Nature": 0.4, "Oddities": 0.3, "Mercado da Bola": 0.1, "Futebol Brasileiro": 0.1
         }
 
         # Thresholds
@@ -106,11 +106,12 @@ class NewsPublisherDomain:
             for topic in topics:
                 norm_topic = topic.capitalize() 
                 mult = self.TOPIC_MULTIPLIERS.get(norm_topic, 1.0)
-                # Logic: Boost if good topic exists, Downgrade only if ALL are bad
-                if mult > best_multiplier: 
-                    best_multiplier = mult
-                elif mult < 1.0 and best_multiplier == 1.0:
-                     best_multiplier = mult
+                best_multiplier*=mult
+                # # Logic: Boost if good topic exists, Downgrade only if ALL are bad
+                # if mult > best_multiplier: 
+                #     best_multiplier = mult
+                # elif mult < 1.0 and best_multiplier == 1.0:
+                #      best_multiplier = mult
             
             score *= best_multiplier
 
