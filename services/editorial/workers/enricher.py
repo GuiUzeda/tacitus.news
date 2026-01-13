@@ -26,8 +26,8 @@ class NewsEnricherWorker(BaseQueueWorker):
         )
         
         # Instantiate Domain Logic (Manages ProcessPool)
-        self.domain = EnrichingDomain(max_cpu_workers=2, http_concurrency=5)
-        
+        self.domain = EnrichingDomain(max_cpu_workers=1, http_concurrency=10)
+
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=ArticlesQueueModel,

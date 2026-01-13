@@ -10,7 +10,8 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 from bs4 import BeautifulSoup
 from loguru import logger
-from playwright.async_api import async_playwright
+
+from core.browser import BrowserFetcher
 
 
 class BaseHarvester:
@@ -28,19 +29,7 @@ class BaseHarvester:
         self.cutoff_date = datetime.now(timezone.utc) - cutoff
         
         # Expanded User Agent List for Rotation
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
-            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-            "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
-        ]
+        self.user_agents = BrowserFetcher.USER_AGENTS
 
         # Standard Headers to mimic a real browser
         self.headers = {
@@ -223,93 +212,13 @@ class BaseHarvester:
         Supports JavaScript rendering and Infinite Scroll.
         Suitable for SPAs like Band.com.br.
         """
-        logger.info(f"🎭 Browser Fetching: {url} (Scrolls: {scroll_depth})")
-        
-        async with async_playwright() as p:
-            for browser_name in ["chromium", "firefox"]:
-                try:
-                    browser_type = getattr(p, browser_name)
-                    # Chromium needs sandbox flags in Docker
-                    args = [
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-infobars",
-                        "--window-position=0,0",
-                        "--ignore-certificate-errors",
-                        "--ignore-certificate-errors-spki-list",
-                    ] if browser_name == "chromium" else []
-
-                    browser = await browser_type.launch(headless=True, args=args)
-                    
-                    try:
-                        if browser_name == "chromium":
-                            ua = random.choice(self.user_agents)
-                        else:
-                            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
-
-                        context = await browser.new_context(
-                            user_agent=ua,
-                            viewport={"width": 1280, "height": 800}
-                        )
-                        page = await context.new_page()
-
-                        # Block heavy resources to speed up loading and save bandwidth
-                        await page.route("**/*", lambda route: route.abort() 
-                            if route.request.resource_type in ["image", "media", "font"] 
-                            else route.continue_()
-                        )
-
-                        # 1. Load Page
-                        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                        await page.wait_for_timeout(2000) # Settle time
-
-                        # 2. Close potential popups/overlays
-                        try: 
-                            await page.keyboard.press("Escape")
-                        except: 
-                            pass
-
-                        # 3. Robust Interaction Loop (Scroll / Click Load More)
-                        for i in range(scroll_depth):
-                            # Strategy A: Look for "Load More" buttons
-                            try:
-                                load_btn = page.get_by_role(
-                                    "button", 
-                                    name=re.compile(r"carregar mais|ver mais|leia mais|veja mais", re.IGNORECASE)
-                                )
-                                if await load_btn.count() > 0 and await load_btn.first.is_visible():
-                                    await load_btn.first.click(force=True)
-                                    await page.wait_for_timeout(3000) # Give it time to load content
-                                    continue 
-                            except: 
-                                pass
-                            
-                            # Strategy B: Keyboard Navigation (Works on overflow divs)
-                            await page.keyboard.press("End")
-                            await page.wait_for_timeout(500)
-                            
-                            # Strategy C: Mouse Wheel (Simulates human scroll)
-                            await page.mouse.wheel(0, 15000)
-                            await page.wait_for_timeout(2000)
-
-                        html_content = await page.content()
-                        await browser.close()
-                        
-                        return self._parse_html_links(
-                            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked, ignore_hashes
-                        )
-
-                    except Exception as e:
-                        logger.warning(f"{browser_name.capitalize()} Crash {url}: {e}")
-                        await browser.close()
-                        continue
-
-                except Exception as e:
-                    logger.error(f"Browser Launch Failed ({browser_name}): {e}")
-                    continue
-        
-        return []
+        html_content = await BrowserFetcher.fetch(url, scroll_depth=scroll_depth)
+        if not html_content:
+            return []
+            
+        return self._parse_html_links(
+            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked, ignore_hashes
+        )
 
     def _parse_html_links(
         self, 
@@ -634,64 +543,7 @@ class BaseHarvester:
 
     async def _fetch_text_browser(self, url: str) -> Optional[bytes]:
         """Fallback: Fetch raw content using Playwright."""
-        try:
-            async with async_playwright() as p:
-                for browser_name in ["firefox", "chromium"]:
-                    try:
-                        browser_type = getattr(p, browser_name)
-                        # Chromium needs sandbox flags in Docker
-                        args=[
-                        "--disable-blink-features=AutomationControlled", # CRÍTICO: Remove a flag 'navigator.webdriver'
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-infobars",
-                        "--window-position=0,0",
-                        "--ignore-certificate-errors",
-                        "--ignore-certificate-errors-spki-list",
-                    ] if browser_name == "chromium" else []
-                       
-                        
-                        browser = await browser_type.launch(headless=True, args=args)
-
-                        try:
-                            # Fix typo in UA string (removed trailing ') and match browser
-                            if browser_name == "chromium":
-                                ua = random.choice(self.user_agents)
-                            else:
-                                ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
-
-                            context = await browser.new_context(
-                                user_agent=ua,
-                                viewport={"width": 1280, "height": 800}
-                            )
-                            page = await context.new_page()
-
-                            # Block heavy resources
-                            await page.route("**/*", lambda route: route.abort() 
-                                if route.request.resource_type in ["image", "media", "font"] 
-                                else route.continue_()
-                            )
-
-                            logger.info(f"🎭 {browser_name.capitalize()} navigating to {url}...")
-                            response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                            
-                            status = 0
-                            if response:
-                                # Handle potential API difference (method vs property)
-                                status = response.status if isinstance(response.status, int) else response.status()
-
-                            if status == 200:
-                                return await response.body()
-                        except Exception as e:
-                            logger.warning(f"{browser_name.capitalize()} Fallback internal error {url}: {e}")
-                        finally:
-                            await browser.close()
-                    except Exception as e:
-                         logger.error(f"{browser_name.capitalize()} Launch failed: {e}")
-        except Exception as e:
-             logger.error(f"Browser Driver failed: {e}")
-        
-        return None
+        return await BrowserFetcher.fetch(url, return_bytes=True)
 
     async def harvest_latest_date_id(self, session, url, pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
         """ 

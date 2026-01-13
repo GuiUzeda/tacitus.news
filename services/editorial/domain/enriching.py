@@ -15,6 +15,7 @@ from core.nlp_service import NLPService
 from news_events_lib.models import ArticleModel, ArticleContentModel, JobStatus
 from core.models import ArticlesQueueModel, ArticlesQueueName
 from config import Settings
+from core.browser import BrowserFetcher
 
 # --- MULTIPROCESSING HELPERS ---
 
@@ -98,10 +99,7 @@ def _process_content_cpu_task(html: str, title: str, existing_summary: str) -> O
         return None
 
 class EnrichingDomain:
-    USER_AGENTS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ]
+    USER_AGENTS = BrowserFetcher.USER_AGENTS
 
     def __init__(self, max_cpu_workers=2, http_concurrency=5):
         self.settings = Settings()
@@ -189,6 +187,12 @@ class EnrichingDomain:
                                     return
 
                                 html = await resp.text(errors="replace")
+                                if len(html) < 500 or "<div id=\"root\"></div>" in html:
+                                    logger.warning(f"⚠️ SPA Detected for {article.id}. Falling back to Browser...")
+                                    
+                                    # OPTION: Call the existing Playwright logic from BaseHarvester
+                                    html = await BrowserFetcher.fetch(article.original_url)
+                                    
                     except Exception as e:
                         logger.warning(f"Fetch failed for {article.id}: {e}")
                         job.status = JobStatus.FAILED
