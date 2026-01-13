@@ -132,21 +132,24 @@ class CloudNewsFilter:
         
         Task: Select ALL headlines that could have ANY impact on Public Policy, Economy, or Society.
         
-        **INCLUDE (Broad Criteria):**
-        - **Politics:** All branches (Executive, Legislative, Judiciary), Elections, Laws, Corruption.
-        - **Economy:** Markets, Companies (i.e. Petrobras, Vale, Banks), Inflation, Taxes, Agribusiness, Real Estate.
-        - **Society:** Health, Education, Environment/Climate, Transport, Infrastructure.
-        - **Tech/Science:** ONLY if it involves Regulation, AI Policy, or huge investments.
-        - **International:** Relevant International news
-        - **Security and crimes:** Public Security, Crimes
+        **CORE RULE: IMPACT OVERRIDES TOPIC.**
+        If a story involves a politician, public funds, crime, investigations, or debt, IT IS RELEVANT, even if it mentions a sports team or celebrity.
         
-        **EXCLUDE (Strict Blocklist):**
-        - Sports Results / Football Games / Sports teams / Football Games Results.
-        - Celebrity Gossip / Novelas / Reality Shows (BBB).
-        - Horoscopes / Recipes / lifestyle tips.
-        - Product Reviews (e.g., "Review of iPhone 16"), including cars
-        - Weather / Forecast 
-        - Lotery results.    
+        **INCLUDE (Broad Criteria):**
+        - **Politics:** All branches, Elections, Laws, Corruption.
+        - **Economy:** Markets, Companies (Petrobras, Vale, Banks), Inflation, Taxes, Agribusiness.
+        - **Society:** Health, Education, Environment/Climate, Transport, Infrastructure.
+        - **Security:** Public Security, Crimes, Police Operations.
+        
+        **CRITICAL INTERSECTIONS (Do NOT Block):**
+        - **Sports + Business/Law:** Corruption in CBF, Player tax evasion, Public stadiums debt, betting scandals.
+        - **Gossip + Politics:** Scandals involving ministers, public figures committing crimes.
+        
+        **EXCLUDE (True Noise Only):**
+        - **PURE** Sports Match Results (e.g., "Flamengo 2 x 1 Vasco", "Neymar injured", "Team Lineup").
+        - **PURE** Celebrity Gossip (e.g., "Actor dating Actress", "Outfit of the day", "Reality Show elimination").
+        - Horoscopes, Recipes, Lifestyle tips.
+        - Product Reviews (phones, cars) & Lottery results.
         
         Input Headlines:
         {items_str}

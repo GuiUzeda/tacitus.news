@@ -4,7 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from loguru import logger
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -59,6 +59,10 @@ class NewsFilterWorker(BaseQueueWorker):
             .join(ArticleModel, ArticlesQueueModel.article_id == ArticleModel.id)
             .where(ArticlesQueueModel.status == self.pending_status)
             .where(ArticlesQueueModel.queue_name == self.queue_name)
+            .where(
+                (ArticleModel.published_date >= datetime.now(timezone.utc) - timedelta(days=7)) | 
+                (ArticleModel.published_date.is_(None))
+            )
             .order_by(ArticlesQueueModel.created_at.asc())
             .limit(self.batch_size)
             .with_for_update(skip_locked=True)

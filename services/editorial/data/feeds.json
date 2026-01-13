@@ -42,7 +42,6 @@
         "url_pattern": "https://.*/\\d{4}/\\d{2}/.*\\.ghtml"
       },
       {
-        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/|/blogs/)",
         "url": "https://oglobo.globo.com/sitemap/oglobo/news.xml"
       }
     ]
@@ -126,7 +125,7 @@
         "is_ranked": true
       },
       {
-        "allowed_sections": "(/politica/|/economia/|/mundo/|/justica/|/sociedade/|/cartaexpressa/)",
+        
         "url": "https://www.cartacapital.com.br/sitemap_index.xml",
         "url_pattern": "https://www\\.cartacapital\\.com\\.br/post-sitemap(\\d*)\\.xml",
         "feed_type": "sitemap_index_id"
@@ -177,7 +176,7 @@
         "is_ranked": true
       },
       {
-        "allowed_sections": "(/politica/|/economia/|/mundo/)",
+        
         "url": "https://www.cnnbrasil.com.br/sitemap_index.xml",
         "url_pattern": "https://www\\.cnnbrasil\\.com\\.br/sitemap/(\\d*)\\.xml",
         "feed_type": "sitemap_index_id"
@@ -201,7 +200,7 @@
       },
       {
         "blocklist": "None",
-        "allowed_sections": "(/politica/|/economia/|/mundo/|/brasil/)",
+        
         "url": "https://g1.globo.com/sitemap/g1/news.xml"
       }
     ]
@@ -312,11 +311,11 @@
         "is_ranked": true
       },
       {
-        "url": "https://www.metropoles.com/sitemap/noticias-{{today}}.xml",
-        "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)"
+        "url": "https://www.metropoles.com/sitemap/noticias-{{today}}.xml"
+        
       },
       {
-        "allowed_sections": "(/colunas/|/negocios/|/mundo/|/brasil/)",
+        
         "url": "https://www.metropoles.com/sitemap.xml",
         "url_pattern": "https://www\\.metropoles\\.com/sitemap/noticias-(\\d{4}-\\d{2}-\\d{2})\\.xml",
         "feed_type": "sitemap_index_date"

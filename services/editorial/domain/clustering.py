@@ -1,10 +1,11 @@
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from dataclasses import dataclass
 
 from loguru import logger
-from sqlalchemy import delete, select, func, and_, desc, update, or_
+from sqlalchemy import delete, select, func, and_, desc, update, or_, text
 from sqlalchemy.orm import Session, aliased, sessionmaker, joinedload
 from sqlalchemy import create_engine
 
@@ -47,6 +48,14 @@ class NewsCluster:
         self.SIMILARITY_LOOSE = self.settings.similarity_loose
 
     # --- STANDARD ACTIONS ---
+
+    def _get_advisory_lock(self, session: Session, key_str: str):
+        """Acquires a Postgres Transaction-level Advisory Lock based on the string hash."""
+        # Create a deterministic 32-bit integer hash from the title
+        lock_id = zlib.crc32(key_str.encode('utf-8')) 
+        
+        # pg_advisory_xact_lock automatically releases at the end of the transaction
+        session.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": lock_id})
 
     def execute_merge_action(
         self, session: Session, article: ArticleModel, event: NewsEventModel
@@ -398,6 +407,10 @@ class NewsCluster:
             if pub_date < datetime.now(timezone.utc) - timedelta(days=7):
                 return ClusterResult("IGNORED", None, [], "Article too old (> 7 days)")
 
+        # 1. LOCKING PHASE
+        # Lock based on the title to serialize duplicate stories (Race Condition Fix)
+        self._get_advisory_lock(session, article.title)
+
         text_query = self.derive_search_query(article)
         vector = article.embedding
 
@@ -431,6 +444,22 @@ class NewsCluster:
             return ClusterResult("NEW", new_id, [], reason)
 
         if self.SIMILARITY_STRICT < vec_dist < self.SIMILARITY_LOOSE:
+            # HEURISTIC: "The Hot Hand" (Ambiguity Hell Fix)
+            # If the best match is VERY recent (< 4h) and VERY active (> 10 articles),
+            # we relax the strictness. It's likely the breaking news everyone is writing about.
+            is_fresh = False
+            if best_ev.last_updated_at:
+                last_upd = best_ev.last_updated_at
+                if last_upd.tzinfo is None:
+                    last_upd = last_upd.replace(tzinfo=timezone.utc)
+                is_fresh = (datetime.now(timezone.utc) - last_upd).total_seconds() < 14400 # 4 hours
+            
+            is_big = best_ev.article_count > 10
+            
+            if is_fresh and is_big and vec_dist < 0.12:
+                 self._link_to_event(session, best_ev, article, vector)
+                 return ClusterResult("MERGE", best_ev.id, [], "Auto-Merge: Hot Topic Heuristic")
+
             self._create_proposal(session, article, best_ev, vec_dist)
             return ClusterResult(
                 "PROPOSE",
@@ -500,10 +529,14 @@ class NewsCluster:
         EventAggregator.aggregate_interests(event, article.interests)
         EventAggregator.aggregate_main_topics(event, article.main_topics)
         EventAggregator.aggregate_metadata(event, article)
-
-        # 4. Local Search Optimization (Keep search_text updated)
-        if event.search_text:
-            event.search_text += f" {article.title}"
+        
+        # 4. Local Search Optimization (Black Hole Fix)
+        # Pruning: Keep only the last 50 unique words to prevent keyword soup
+        current_text = event.search_text or ""
+        new_keywords = f"{current_text} {article.title}".split()
+        unique_words = list(dict.fromkeys(reversed(new_keywords)))[:50]
+        event.search_text = " ".join(reversed(unique_words))
+        
         event.last_updated_at = datetime.now(timezone.utc)
 
         # 5. Helper for Bias Distribution (Specific to Clustering logic)
