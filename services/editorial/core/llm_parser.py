@@ -565,8 +565,8 @@ class CloudNewsAnalyzer:
         
         **IMPACT SCORING RUBRIC (0-100) - IMPORTANT!:**
         Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
-        - **0-30 (Noise):** Celebrity gossip, viral social media trends, minor crime with no wider implication.
-        - **31-60 (Routine):** Standard political statements, economic updates, sports results, entertainment releases.
+        - **0-30 (Noise):** Celebrity gossip, viral social media trends, minor crime with no wider implication, sports results, entertainment releases.
+        - **31-60 (Routine):** Standard political statements, economic updates.
         - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
         - **81-100 (Historic/Critical):** Wars, Constitutional crises, Pandemics, Assassinations of heads of state.
         

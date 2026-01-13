@@ -123,6 +123,8 @@ class EditorialCLI:
                 table.add_column("Title")
                 table.add_column("Tags", style="magenta italic")
                 table.add_column("Published")
+                table.add_column("Last Artc.")
+                
 
                 for i, e in enumerate(events):
                     tags = []
@@ -137,6 +139,7 @@ class EditorialCLI:
                         e.title[:60],
                         ", ".join(tags),
                          e.created_at.strftime("%Y-%m-%d") if e.created_at else "-",
+                         e.last_article_date.strftime("%Y-%m-%d") if e.last_article_date else "-",
                     )
                 console.print(table)
 

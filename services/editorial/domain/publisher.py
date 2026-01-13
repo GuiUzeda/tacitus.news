@@ -15,8 +15,8 @@ class NewsPublisherDomain:
         self.WEIGHT_VOLUME = 4.0
         
         # FIX 1: RECENCY DECAY CONFIG
-        self.RECENCY_MAX_BONUS = 40.0
-        self.RECENCY_HALFLIFE_HOURS = 12.0 
+        self.RECENCY_MAX_BONUS = 400.0
+        self.RECENCY_HALFLIFE_HOURS = 6.0 
         
         # FIX 2: FEED BASELINE (Approximate your feeds.json distribution)
         # This prevents "Center" from dominating just because you have more Center feeds.
@@ -89,10 +89,10 @@ class NewsPublisherDomain:
         
         # Decay Formula: 40 * (0.5 ^ (age / 12))
         # 0h = 40pts | 12h = 20pts | 24h = 10pts
-        if age_hours < 24:
+        if age_hours < 48:
             recency_score = self.RECENCY_MAX_BONUS * (0.5 ** (age_hours / self.RECENCY_HALFLIFE_HOURS))
             score += recency_score
-            if recency_score > 70: # Arbitrary threshold for "Breaking" tag
+            if recency_score > 200: # Arbitrary threshold for "Breaking" tag
                 insights.append("BREAKING")
         else:
              # Archive penalty for very old stuff
