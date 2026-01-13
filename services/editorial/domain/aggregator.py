@@ -44,12 +44,12 @@ class EventAggregator:
         Updates the event centroid using incremental mean formula.
         Assumes aggregate_basic_stats has already incremented article_count.
         """
-        if not new_vector: return
+        if new_vector is None or len(new_vector) == 0: return
         
         n = event.article_count
         
         # Initialization or Reset
-        if n <= 1 or not event.embedding_centroid:
+        if n <= 1 or event.embedding_centroid is None or len(event.embedding_centroid) == 0:
             event.embedding_centroid = new_vector
             return
 
