@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
 import aiohttp
+from sqlalchemy import select
 import trafilatura
 from loguru import logger
 from sqlalchemy.orm import Session
@@ -168,7 +169,8 @@ class EnrichingDomain:
         if llm_candidates:
             logger.info(f"🧠 Sending {len(llm_candidates)} articles to LLM for Summarization/Stance...")
             try:
-                llm_outputs = await self.llm.analyze_articles_batch(llm_candidates)
+                llm_texts = [f"{art.title}\n\n{art.contents[0].content}" for art in llm_candidates]
+                llm_outputs = await self.llm.analyze_articles_batch(llm_texts)
                 
                 # Apply results back to the `results` list to be saved in Phase 3
                 for k, output in enumerate(llm_outputs):
@@ -182,7 +184,7 @@ class EnrichingDomain:
         # 3. PHASE 3: Save & Route
         for job, res, needs_refilter in results:
             if res:
-                self._apply_enrichment_result( job, res, needs_refilter)
+                self._apply_enrichment_result(session, job, res, needs_refilter)
             else:
                 if job.status == JobStatus.PROCESSING:
                      job.status = JobStatus.FAILED
@@ -275,7 +277,7 @@ class EnrichingDomain:
                 job.msg = f"Critical: {str(e)[:50]}"
                 return job, None, False
 
-    def _apply_enrichment_result(self,  job, result, needs_refilter):
+    def _apply_enrichment_result(self, session,  job, result, needs_refilter):
         article: ArticleModel = job.article
         
         # 1. Content & Metadata
@@ -302,8 +304,9 @@ class EnrichingDomain:
             article.clickbait_reasoning = llm_out.clickbait_reasoning
             article.key_points = llm_out.key_points
             article.interests = llm_out.entities
-            article.title = llm_out.title
             article.main_topics = llm_out.main_topics
+            article.title = llm_out.title
+            article.subtitle = llm_out.subtitle
             for entities in llm_out.entities.values():
                 article.entities.extend(entities)
             article.summary_date = datetime.now(timezone.utc)
@@ -313,24 +316,58 @@ class EnrichingDomain:
         # 3. ROUTING LOGIC
         
         if needs_refilter:
-            logger.info(f"↩️ Boomerang: Sending '{article.title[:20]}' back to FILTER for validation.")
+            logger.info(f"↩️ Boomerang: Sending '{article.title[:20]}' back to FILTER.")
             job.status = JobStatus.PENDING
-            job.queue_name = ArticlesQueueName.FILTER  # 👈 Back to Filter
+            job.queue_name = ArticlesQueueName.FILTER
             job.updated_at = datetime.now(timezone.utc)
             return
 
-        # Final Check: Did we fail to get a title even after everything?
+        # 2. Untitled Check
         if not article.title or article.title.lower() in ["no title", "unknown", ""]:
-            logger.warning(f"❌ Article {article.id} REJECTED: Untitled after enrichment.")
             job.status = JobStatus.REJECTED
             job.msg = "Untitled (Auto-Reject)"
             return
 
-        # Success -> Cluster
+        # 3. SHORT CIRCUIT: Existing Event (The Optimization)
+        # If this article is already part of an event (e.g., it was just updated/corrected),
+        # we skip the Cluster worker to avoid double-counting and go straight to Enhancer.
+        if article.event_id:
+            logger.info(f"⚡ Article {article.id} already in Event {article.event_id}. Waking Enhancer.")
+            
+            # A. Wake up the Event
+            # We use a raw SQL upsert or a helper to push the Event to the Enhancer Queue
+            from core.models import EventsQueueModel, EventsQueueName # Ensure imports
+            
+            # Check if event job exists
+            existing_event_job = session.scalar(
+                select(EventsQueueModel).where(EventsQueueModel.event_id == article.event_id)
+            )
+            
+            if existing_event_job:
+                existing_event_job.status = JobStatus.PENDING
+                existing_event_job.queue_name = EventsQueueName.ENHANCER
+                existing_event_job.updated_at = datetime.now(timezone.utc)
+            else:
+                new_event_job = EventsQueueModel(
+                    event_id=article.event_id,
+                    queue_name=EventsQueueName.ENHANCER,
+                    status=JobStatus.PENDING,
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc)
+                )
+                session.add(new_event_job)
+
+            # B. Mark Article as Done (Skip Cluster)
+            job.status = JobStatus.COMPLETED
+            job.queue_name = ArticlesQueueName.CLUSTER # Technically done, but keeping name for history is fine
+            job.updated_at = datetime.now(timezone.utc)
+            return
+
+        # 4. Standard Flow: Go to Cluster
         job.status = JobStatus.PENDING
         job.queue_name = ArticlesQueueName.CLUSTER
         job.updated_at = datetime.now(timezone.utc)
-        logger.success(f"✅ Enriched: {article.title[:30]}")
+        logger.success(f"✅ Enriched: {article.title[:30]} -> Cluster")
     
     def _parse_date(self, date_val: str | datetime) -> Optional[datetime]:
         if not date_val: return None

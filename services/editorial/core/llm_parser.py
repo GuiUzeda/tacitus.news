@@ -46,7 +46,7 @@ def with_retry(max_retries=5, base_delay=30):
                         match = re.search(r"['\"]retrydelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
                         if match:
                             try:
-                                wait = (float(match.group(1)) + random.randint(0, 20)) * (2 ** attempt) 
+                                wait = (float(match.group(1)) + random.randint(0, 120)) * (2 ** attempt) 
                             except ValueError:
                                 pass
                         
@@ -258,7 +258,7 @@ class CloudNewsAnalyzer:
 
         JSON Schema for each object:
         {{
-            "title": "Factual title of the article in portuguese",
+            "title": "Original title of the article in portuguese",
             "subtitle": "Subtitle/excerpt of the article in portuguese",
             "summary": "Two sentence summary in portuguese",
             "key_points": ["Fact-dense sentence 1...", "Fact-dense sentence 2..."],
@@ -489,7 +489,7 @@ class CloudNewsAnalyzer:
         
         **OUTPUT JSON SCHEMA:**
         {{
-            "title": "Factual title of the article in portuguese",
+            "title": "Original title of the article in portuguese",
             "subtitle": "Subtitle/excerpt of the article in portuguese",
             "summary": "Two sentence summary in portuguese",
             "summary": "Two sentence summary",

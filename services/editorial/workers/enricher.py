@@ -32,7 +32,7 @@ class NewsEnricherWorker(BaseQueueWorker):
             session_maker=self.SessionLocal,
             queue_model=ArticlesQueueModel,
             target_queue_name=ArticlesQueueName.ENRICH,
-            batch_size=20, # Smaller batch size due to heavy processing
+            batch_size=10, # Smaller batch size due to heavy processing
             pending_status=JobStatus.PENDING
         )
 

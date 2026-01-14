@@ -29,24 +29,19 @@ class NewsEnhancerDomain:
         
         # CONFIG
         self.DEBOUNCE_MINUTES = 10  # Don't re-summarize if updated < 10 mins ago
-
     async def enhance_event_job(self, session: Session, job: EventsQueueModel):
-        """
-        Main logic for enhancing an event.
-        1. Identifies new/pending articles.
-        2. Batches them for LLM analysis (Entity/Stance extraction).
-        3. Aggregates stats (Bias/Interests).
-        4. Generates/Updates the Event Summary if needed.
-        5. Moves to Publisher queue (unless new data arrived during process).
-        """
         event: NewsEventModel | None = job.event
         if not event:
             job.status = JobStatus.FAILED
             job.msg = "Event Not Found"
             return
 
-        # 1. Fetch & Filter Articles
-        # We skip articles involved in active merge proposals to avoid race conditions
+        # 1. FETCH THE "DELTA" (Articles ready to be integrated)
+        # We strictly look for COMPLETED articles. 
+        # - PENDING: Not ready (waiting for Enricher)
+        # - APPROVED: Already inside the summary (skip)
+        # - COMPLETED: Enriched by Enricher, waiting for us!
+        
         article_proposals = select(1).where(
             MergeProposalModel.source_article_id == ArticleModel.id,
             MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
@@ -55,121 +50,55 @@ class NewsEnhancerDomain:
         stmt = (
             select(ArticleModel)
             .filter(ArticleModel.event_id == event.id)
+            .filter(ArticleModel.summary_status == JobStatus.COMPLETED) # 👈 The Filter
             .options(
                 joinedload(ArticleModel.contents), joinedload(ArticleModel.newspaper)
             )
-            .filter(ArticleModel.summary_status == JobStatus.PENDING)
             .filter(~exists(article_proposals))
         )
-        articles = session.scalars(stmt).unique().all()
+        new_articles = session.scalars(stmt).unique().all()
 
         summary_inputs = []
-        processed_ids = set()
+        articles_to_mark_integrated = []
 
-        # --- PHASE 1: Process Pending Articles (Batched) ---
-        if articles:
-            logger.info(f"Enhancing '{event.title}' ({len(articles)} new articles)...")
+        # --- PHASE 1: Collect Inputs from the Delta ---
+        if new_articles:
+            logger.info(f"Enhancing '{event.title}' ({len(new_articles)} new items)...")
+            
+            # Since these are COMPLETED, we trust they have data.
+            # No need to run batches or call LLM here (Enricher did it).
+            for article in new_articles:
+                if article.key_points:
+                    summary_inputs.append({
+                        "bias": article.newspaper.bias,
+                        "key_points": article.key_points,
+                    })
+                    articles_to_mark_integrated.append(article)
+                    
+                    # Update Aggregates incrementally
+                    EventAggregator.aggregate_interests(event, article.interests)
+                    EventAggregator.aggregate_main_topics(event, article.main_topics)
+                    EventAggregator.aggregate_stance(event, article.newspaper.bias, article.stance or 0.0)
+                    EventAggregator.aggregate_clickbait(event, article.newspaper.bias, article.clickbait_score or 0.0)
+                    EventAggregator.aggregate_basic_stats(event, article)
 
-            BATCH_SIZE = 4
-            article_batches = [
-                articles[i : i + BATCH_SIZE]
-                for i in range(0, len(articles), BATCH_SIZE)
-            ]
 
-            for batch in article_batches:
-                valid_articles = []
-                batch_texts = []
-
-                for article in batch:
-                    if article.contents and article.contents[0].content:
-                        # Truncate handled by CloudNewsAnalyzer.smart_truncate internally now
-                        batch_texts.append(f"{article.title}\n\n{article.contents[0].content}")
-                        valid_articles.append(article)
-
-                if not batch_texts:
-                    continue
-
-                # Concurrent Batch Analysis
-                try:
-                    async with self.semaphore:
-                        batch_results = await self.enhancer.analyze_articles_batch(
-                            batch_texts
-                        )
-                except Exception as e:
-                    logger.error(f"Batch analysis failed: {e}")
-                    # Mark batch as failed
-                    for art in valid_articles:
-                        art.summary_status = JobStatus.FAILED
-                    continue
-
-                if not batch_results:
-                    continue
-
-                # Map Results
-                for article, result in zip(valid_articles, batch_results):
-                    if not result:
-                        continue
-
-                    # Update Article
-                    self._update_article_from_llm(article, result)
-                    session.add(article)
-
-                    # Collect for Summary
-                    summary_inputs.append(
-                        {
-                            "bias": article.newspaper.bias,
-                            "key_points": result.key_points,
-                        }
-                    )
-                    processed_ids.add(article.id)
-
-                    # Aggregate Stats to Event
-                    EventAggregator.aggregate_interests(event, result.entities)
-                    EventAggregator.aggregate_main_topics(event, result.main_topics)
-                    EventAggregator.aggregate_stance(
-                        event, article.newspaper.bias, result.stance
-                    )
-                    EventAggregator.aggregate_clickbait(
-                        event, article.newspaper.bias, result.clickbait_score
-                    )
-
-        # --- PHASE 2: Check Logic for Re-Summarization ---
+        # --- PHASE 2: Debounce & Context ---
         last_sum = event.last_summarized_at or datetime.min
-        if last_sum.tzinfo is None:
-            last_sum = last_sum.replace(tzinfo=timezone.utc)
-
+        if last_sum.tzinfo is None: last_sum = last_sum.replace(tzinfo=timezone.utc)
+        
         job_updated = job.updated_at or datetime.min
-        if job_updated.tzinfo is None:
-            job_updated = job_updated.replace(tzinfo=timezone.utc)
+        if job_updated.tzinfo is None: job_updated = job_updated.replace(tzinfo=timezone.utc)
 
-        # If job is newer than last summary, it implies a Merge or Manual trigger occurred
         has_external_update = job_updated > last_sum
-
-        # IMPROVEMENT: Debounce Check
-        # If summarized very recently, we SKIP Phase 5 (Synthesis) unless it's a "First Summary"
+        
         should_skip_synthesis = False
         now = datetime.now(timezone.utc)
-        time_since_last = now - last_sum
-        
-        if event.summary and time_since_last < timedelta(minutes=self.DEBOUNCE_MINUTES):
-             # Debounce active: We gathered stats (Phase 1), but we won't rewrite the summary text.
-             logger.info(f"⏳ Debouncing Synthesis for '{event.title}' (Last sum: {time_since_last.seconds}s ago)")
+        if event.summary and (now - last_sum) < timedelta(minutes=self.DEBOUNCE_MINUTES):
              should_skip_synthesis = True
 
-        if not summary_inputs and not has_external_update:
-            # Nothing new to do
-            if event.article_count > 0:
-                job.status = JobStatus.PENDING
-                job.queue_name = EventsQueueName.PUBLISHER
-            else:
-                job.status = JobStatus.FAILED
-                job.msg = "No articles"
-            return
-
-        # --- PHASE 3: Gather Context from Merges ---
-        force_context_fetch = False
+        # Check for Merged Context (The Merger might have dumped info here)
         if has_external_update and not should_skip_synthesis:
-            # Fetch summaries from events recently merged into this one
             stmt_merges = select(NewsEventModel).where(
                 NewsEventModel.merged_into_id == event.id,
                 NewsEventModel.last_updated_at > last_sum,
@@ -178,69 +107,52 @@ class NewsEnhancerDomain:
             for m_ev in merged_events:
                 s_text = self._extract_summary_text(m_ev)
                 if s_text:
-                    summary_inputs.append(
-                        {
-                            "bias": "merged_context",
-                            "key_points": [
-                                f"Context from merged event '{m_ev.title}': {s_text}"
-                            ],
-                        }
-                    )
-                else:
-                    force_context_fetch = True
+                    summary_inputs.append({
+                        "bias": "merged_context",
+                        "key_points": [f"Context from merged event '{m_ev.title}': {s_text}"],
+                    })
 
-        # --- PHASE 4: Fallback Context ---
-        # If we need to re-summarize but have no *new* inputs, fetch *recent* articles
-        if (not summary_inputs or force_context_fetch) and has_external_update and not should_skip_synthesis:
-            stmt_ctx = (
-                select(ArticleModel)
-                .filter(ArticleModel.event_id == event.id)
-                .filter(ArticleModel.summary_status == JobStatus.COMPLETED)
-                .options(joinedload(ArticleModel.newspaper))
-                .order_by(ArticleModel.published_date.desc())
-                .limit(10)
-            )
-            ctx_articles = session.scalars(stmt_ctx).unique().all()
-            for art in ctx_articles:
-                if art.id not in processed_ids:
-                    points = art.key_points or ([art.summary] if art.summary else [])
-                    if points:
-                        summary_inputs.append(
-                            {"bias": art.newspaper.bias, "key_points": points}
-                        )
+        if not summary_inputs and not has_external_update:
+            # Done
+            if event.article_count > 0:
+                job.status = JobStatus.PENDING
+                job.queue_name = EventsQueueName.PUBLISHER
+            else:
+                job.status = JobStatus.FAILED
+                job.msg = "No articles"
+            return
 
-        # --- PHASE 5: Generate & Save Summary ---
+        # --- PHASE 3: Synthesis ---
         session.add(event)
-        session.flush()  # Ensure aggregations are visible
+        session.flush()
 
         if summary_inputs and not should_skip_synthesis:
-            logger.info(
-                f"Summarizing Event {event.id} with {len(summary_inputs)} inputs."
-            )
-            event_summary = await self.enhancer.summarize_event(
-                summary_inputs, event.summary
-            )
+            logger.info(f"Summarizing {event.title} with {len(summary_inputs)} new inputs.")
+            
+            # Pass the previous summary to maintain context!
+            event_summary = await self.enhancer.summarize_event(summary_inputs, event.summary)
+            
             if event_summary:
-                event.subtitle = event_summary.subtitle
                 event.title = event_summary.title or event.title
+                event.subtitle = event_summary.subtitle
                 event.summary = event_summary.summary
                 event.last_summarized_at = datetime.now(timezone.utc)
-                event.articles_at_last_summary = event.article_count
-                event.last_updated_at = datetime.now(timezone.utc)
-                event.ai_impact_score = event_summary.impact_score or 50 
-                event.ai_impact_reasoning = event_summary.impact_reasoning or "" 
-                event.category_tag = event_summary.category or "GENERAL"
+                event.ai_impact_score = event_summary.impact_score
+                event.ai_impact_reasoning = event_summary.impact_reasoning
+                event.category_tag = event_summary.category
+                
+                # ✅ STATE TRANSITION: COMPLETED -> APPROVED
+                # This effectively "signs off" that these articles are in the summary.
+                for article in articles_to_mark_integrated:
+                    article.summary_status = JobStatus.APPROVED
+                    session.add(article)
+                
                 session.add(event)
 
-        # --- PHASE 6: Transition & Race Condition Check ---
-        # CRITICAL: We check if another process (Cluster/Merger) flagged this job
-        # as PENDING while we were working. If so, we do NOT move to publisher.
+        # --- PHASE 4: Transition ---
         session.refresh(job)
         if job.status == JobStatus.PENDING:
-            logger.info(
-                f"🔄 Job for {event.title[:20]} was re-queued during processing. Keeping in ENHANCER."
-            )
-            return
+            return 
 
         job.status = JobStatus.PENDING
         job.queue_name = EventsQueueName.PUBLISHER
@@ -367,7 +279,8 @@ class NewsEnhancerDomain:
             event.ai_impact_score = event_summary.impact_score
             event.ai_impact_reasoning = event_summary.impact_reasoning
             event.last_summarized_at = datetime.now(timezone.utc)
-            event.status = EventStatus.ENHANCED # Ready for Publisher
+            event.status = EventStatus.ENHANCED # Ready for Publishe
+            
             
             session.add(event)
             session.commit()
