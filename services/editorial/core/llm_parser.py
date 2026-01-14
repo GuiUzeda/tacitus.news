@@ -4,6 +4,7 @@ import json
 import re
 import asyncio
 from functools import wraps
+from unittest.mock import Base
 from loguru import logger
 from typing import Dict, List, Optional, Any
 from google import genai
@@ -73,6 +74,8 @@ class LLMNewsOutputSchema(BaseModel):
     clickbait_reasoning: str
     entities: Dict[str, List[str]]
     main_topics: List[str]
+    title: str
+    subtitle: str
 class LLMBatchNewsOutputSchema(BaseModel):
     results: List[LLMNewsOutputSchema]
 class EventMatchSchema(BaseModel):
@@ -109,6 +112,15 @@ class BatchMatchResult(BaseModel):
 
 class BatchMatchResponse(BaseModel):
     results: List[BatchMatchResult]
+    
+class LLMSummaryResponse(BaseModel):
+    title: str
+    subtitle: Optional[str] = None
+    category: str
+    impact_reasoning: str
+    impact_score: int
+    summary: Dict[str, Any] # Can contain 'left', 'right', 'center', 'bias'
+    
 
 # --- Classes ---
 
@@ -246,13 +258,19 @@ class CloudNewsAnalyzer:
 
         JSON Schema for each object:
         {{
-            "summary": "Two sentence summary",
+            "title": "Factual title of the article in portuguese",
+            "subtitle": "Subtitle/excerpt of the article in portuguese",
+            "summary": "Two sentence summary in portuguese",
             "key_points": ["Fact-dense sentence 1...", "Fact-dense sentence 2..."],
             "stance": 0.0, // Float from -1.0 (Critical) to 1.0 (Supportive). 0.0 is Neutral.
             "stance_reasoning": "Short reasoning",
             "clickbait_score": 0.0, // Float from 0.0 (Factual) to 1.0 (Clickbait)
             "clickbait_reasoning": "Short reasoning",
-            "entities": {{ "person": [], "place": [], "org": [], "topic": [] }},
+            "entities": {{
+                "person": ["Full Name 1"],
+                "place": ["City", "Country"],
+                "org": ["Company Name"],
+            }},
             "main_topics": ["Topic 1", "Topic 2"]
         }}
         """
@@ -471,6 +489,9 @@ class CloudNewsAnalyzer:
         
         **OUTPUT JSON SCHEMA:**
         {{
+            "title": "Factual title of the article in portuguese",
+            "subtitle": "Subtitle/excerpt of the article in portuguese",
+            "summary": "Two sentence summary in portuguese",
             "summary": "Two sentence summary",
             "key_points": [
                 "Fact-dense sentence 1...",
@@ -484,7 +505,6 @@ class CloudNewsAnalyzer:
                 "person": ["Full Name 1"],
                 "place": ["City", "Country"],
                 "org": ["Company Name"],
-                "topic": ["Topic 1"]
             }},
             "main_topics": ["Reforma Fiscal", "Inflação"]
         }}
@@ -526,7 +546,7 @@ class CloudNewsAnalyzer:
             return None
 
     @with_retry(max_retries=5, base_delay=30)
-    async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> dict | None:
+    async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> LLMSummaryResponse | None:
         """
         Takes a list of article summaries (grouped by bias) and generates
         the "Ground News" style comparison.
@@ -565,8 +585,9 @@ class CloudNewsAnalyzer:
         
         **IMPACT SCORING RUBRIC (0-100) - IMPORTANT!:**
         Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
-        - **0-30 (Noise):** Celebrity gossip, viral social media trends, minor crime with no wider implication, sports results, entertainment releases.
-        - **31-60 (Routine):** Standard political statements, economic updates.
+        - **0-15 (Noise):** Celebrity gossip, viral social media trends, sports results, entertainment releases, food receipes, horoscopes, weather forecasts.
+        - **16-40 (Local):** Minor local news, minor crime with no wider implication.
+        - **41-60 (Routine):** Standard political statements, economic updates.
         - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
         - **81-100 (Historic/Critical):** Wars, Constitutional crises, Pandemics, Assassinations of heads of state.
         
@@ -602,7 +623,7 @@ class CloudNewsAnalyzer:
                 logger.warning("CloudNewsAnalyzer received empty response.")
                 return None
             clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            return json.loads(clean_text)
+            return LLMSummaryResponse.model_validate_json(clean_text)
         except json.JSONDecodeError as e:
             logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
             return None 

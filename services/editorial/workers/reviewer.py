@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from news_events_lib.models import MergeProposalModel, JobStatus
 from config import Settings
 from core.base_worker import BaseQueueWorker
+from news_events_lib.models import NewsEventModel, EventStatus
 
 # Domain Logic
 from domain.review import NewsReviewerDomain
@@ -114,7 +115,20 @@ class NewsReviewerWorker(BaseQueueWorker):
         Prioritizes Articles, then Events.
         Marks fetched rows as 'processing' immediately to prevent double-reads.
         """
-        # A. Articles
+        urgent_subq = (
+            select(MergeProposalModel.id)
+            .join(NewsEventModel, MergeProposalModel.target_event_id == NewsEventModel.id)
+            .where(
+                MergeProposalModel.status == JobStatus.PENDING,
+                NewsEventModel.status == EventStatus.PUBLISHED
+            )
+            .limit(self.batch_size)
+        )
+        urgent_ids = session.execute(urgent_subq).scalars().all()
+        
+        if urgent_ids:
+            # If we find urgent jobs, return them immediately
+            return self._lock_and_fetch(session, MergeProposalModel.id, urgent_ids)
         subq_art = (
             select(MergeProposalModel.source_article_id)
             .where(

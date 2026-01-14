@@ -1,3 +1,4 @@
+from types import NoneType
 import uuid
 import zlib
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,9 @@ from loguru import logger
 from sqlalchemy import delete, select, func, and_, desc, update, or_, text
 from sqlalchemy.orm import Session, aliased, sessionmaker, joinedload
 from sqlalchemy import create_engine
-
+import numpy as np
+from sklearn.cluster import DBSCAN
+from sklearn.metrics.pairwise import cosine_distances
 # Shared Libraries
 from news_events_lib.models import (
     NewsEventModel,
@@ -652,3 +655,110 @@ class NewsCluster:
             logger.info(
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
+    def calculate_sub_clusters(
+        self, 
+        session: Session, 
+        event: NewsEventModel, 
+        method: str = "DBSCAN_WITH_TIME"
+    ) -> List[List[ArticleModel]]:
+        """
+        Analyzes an event's articles and splits them into cohesive sub-groups 
+        using DBSCAN on a custom (Semantic + Temporal) distance matrix.
+        """
+        # 1. Fetch Data
+        # We need all articles with their embeddings
+        articles = session.scalars(
+            select(ArticleModel)
+            .where(ArticleModel.event_id == event.id)
+            .order_by(ArticleModel.published_date)
+        ).all()
+
+        if len(articles) < 3:
+            return []  # Too small to split
+
+        # 2. Prepare Vectors & Timestamps
+        valid_articles = []
+        vectors = []
+        timestamps = []
+        
+        for art in articles:
+            if not isinstance(art.embedding, NoneType) and len(art.embedding) == 768: # Ensure valid vector
+                valid_articles.append(art)
+                vectors.append(art.embedding)
+                
+                # Normalize time to "Hours since first article"
+                dt = art.published_date
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+                timestamps.append(dt.timestamp() / 3600.0) # Hours
+
+        if not valid_articles:
+            return []
+
+        # Convert to Numpy
+        X_vec = np.array(vectors)
+        # FIX: Keep shape as (N, 1)
+        X_time = np.array(timestamps).reshape(-1, 1) 
+        
+        # 3. Compute Distance Matrix
+        # A. Semantic Distance (0.0 to 1.0+)
+        dist_semantic = cosine_distances(X_vec)
+
+        # B. Temporal Distance (FIXED BROADCASTING)
+        # We perform (N, 1) - (1, N) to get (N, N) matrix
+        t_diff = np.abs(X_time - X_time.T) 
+        
+        # Scale: 24h gap adds 0.15 distance
+        dist_time = (t_diff / 24.0) * 0.15
+
+        # C. Combined Distance
+        # Shape is now safely (N, N)
+        dist_final = dist_semantic + dist_time
+
+        # 4. Run DBSCAN
+        # eps=0.22 -> Cluster Radius. 
+        # min_samples=2 -> Even a pair can form a cluster.
+        db = DBSCAN(eps=0.22, min_samples=2, metric='precomputed')
+        labels = db.fit_predict(dist_final)
+
+        # 5. Group Results
+        clusters = {}
+        noise = []
+
+        for idx, label in enumerate(labels):
+            art = valid_articles[idx]
+            if label == -1:
+                noise.append(idx)
+            else:
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(art)
+
+        # 6. Handle Noise (Assign to nearest cluster)
+        if clusters and noise:
+            for noise_idx in noise:
+                min_dist = 999.0
+                best_cluster = None
+                
+                # Compare noise item against valid cluster members
+                for label, cluster_arts in clusters.items():
+                    # Pick the first article of the cluster as a representative
+                    member_idx = valid_articles.index(cluster_arts[0]) 
+                    d = dist_final[noise_idx][member_idx]
+                    
+                    if d < min_dist:
+                        min_dist = d
+                        best_cluster = label
+                
+                if best_cluster is not None:
+                    clusters[best_cluster].append(valid_articles[noise_idx])
+
+        # 7. Format Output
+        result_groups = list(clusters.values())
+        
+        if len(result_groups) < 2:
+            return []
+
+        # Sort groups by time (Oldest event first)
+        result_groups.sort(key=lambda arts: min(a.published_date for a in arts))
+
+        return result_groups

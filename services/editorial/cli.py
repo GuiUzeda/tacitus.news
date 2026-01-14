@@ -162,6 +162,7 @@ class EditorialCLI:
                 console.print(f"ID: {event.id}")
                 console.print(f"Status: [{event.status.value}] | Active: {event.is_active}")
                 console.print(f"Articles: {event.article_count} | Published: {event.published_at}")
+                console.print(f"Last Updated: {event.last_updated_at} | Last Article: {event.last_article_date}")
                 
                 # --- SCORE BREAKDOWN (The 'Why') ---
                 console.print("\n[bold underline]Score Analysis:[/bold underline]")

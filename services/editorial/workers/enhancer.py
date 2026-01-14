@@ -144,7 +144,7 @@ class NewsEnhancerWorker(BaseQueueWorker):
             if result.rowcount > 0:
                 logger.info(f"🧹 Reset {result.rowcount} stuck enhancer jobs.")
 
-    def _cleanup_stuck_jobs(self):
+    def _cleanup_stuck_jobs(self, session=None):
         timeout = timedelta(minutes=15)
         cutoff = datetime.now(timezone.utc) - timeout
         

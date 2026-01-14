@@ -13,6 +13,7 @@ from news_events_lib.models import (
     JobStatus,
     MergeProposalModel,
 )
+from news_events_lib.models import EventStatus
 from core.models import EventsQueueModel, EventsQueueName
 
 # Core/Services
@@ -220,15 +221,15 @@ class NewsEnhancerDomain:
                 summary_inputs, event.summary
             )
             if event_summary:
-                event.subtitle = event_summary.get("subtitle")
-                event.title = event_summary.get("title", event.title)
-                event.summary = event_summary.get("summary")
+                event.subtitle = event_summary.subtitle
+                event.title = event_summary.title or event.title
+                event.summary = event_summary.summary
                 event.last_summarized_at = datetime.now(timezone.utc)
                 event.articles_at_last_summary = event.article_count
                 event.last_updated_at = datetime.now(timezone.utc)
-                event.ai_impact_score = event_summary.get("impact_score", 50) 
-                event.ai_impact_reasoning = event_summary.get("impact_reasoning", "") 
-                event.category_tag = event_summary.get("category", "GENERAL")
+                event.ai_impact_score = event_summary.impact_score or 50 
+                event.ai_impact_reasoning = event_summary.impact_reasoning or "" 
+                event.category_tag = event_summary.category or "GENERAL"
                 session.add(event)
 
         # --- PHASE 6: Transition & Race Condition Check ---
@@ -270,3 +271,107 @@ class NewsEnhancerDomain:
         if event.summary and isinstance(event.summary, dict):
             return event.summary.get("center") or event.summary.get("bias")
         return None
+
+# [Add this to NewsEnhancerDomain class]
+
+    async def enhance_event_direct(self, session: Session, event: NewsEventModel):
+        """
+        Forces an immediate enhancement (Analysis + Summarization) for a specific event,
+        bypassing queues and debounce timers. Used by the Splitter.
+        """
+        logger.info(f"⚡ Direct Enhance started for: {event.title}")
+
+        # 1. PHASE 1: Micro-Analysis (Ensure all articles have metadata)
+        # The splitter moved articles here, but they might already be analyzed.
+        # We check for any articles missing 'key_points' or 'stance'.
+        unprocessed_articles = [
+            a for a in event.articles 
+            if not a.key_points or not a.stance_reasoning
+        ]
+
+        if unprocessed_articles:
+            logger.info(f"   -> Analyzing {len(unprocessed_articles)} moved articles...")
+            # Reuse the existing batch logic
+            # We assume self.batch_size exists or hardcode it to 5
+            BATCH_SIZE = 5
+            for i in range(0, len(unprocessed_articles), BATCH_SIZE):
+                batch =  unprocessed_articles[i : i + BATCH_SIZE]
+                try:
+                    # We await the LLM call directly
+                    outputs = await self.enhancer.analyze_articles_batch([f"{a.title}\n\n{a.contents[0].content}" for a in batch])
+                    
+                    # Save results to DB immediately
+                    for article, output in zip(batch, outputs):
+                        article.stance = output.stance
+                        article.stance_reasoning = output.stance_reasoning
+                        article.clickbait_score = output.clickbait_score
+                        article.clickbait_reasoning = output.clickbait_reasoning
+                        article.key_points = output.key_points
+                        all_entities = []
+                        if output.entities:
+                            for entity_list in output.entities.values():
+                                all_entities.extend(entity_list)
+                        article.entities = list(set(all_entities))  
+                        article.summary = output.summary # Short summary
+                        session.add(article)
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"   -> Batch analysis failed: {e}")
+
+        # 2. PHASE 2: Aggregation (Math)
+        # Recalculate stats based on the new grouping
+        from domain.aggregator import EventAggregator # Local import to avoid circular dep
+        
+        # Reset aggregates before rebuilding (Optional, but safer for splits)
+        event.interest_counts = {}
+        event.main_topic_counts = {}
+        summary_inputs = []
+        for art in event.articles:
+            EventAggregator.aggregate_basic_stats(event, art) # Re-sums counts
+            EventAggregator.aggregate_interests(event, art.interests)
+            EventAggregator.aggregate_main_topics(event, art.main_topics)
+            if art.key_points and art.newspaper:
+                # Group by bias (simplified for direct mode)
+                summary_inputs.append({
+                    "bias": art.newspaper.bias or "center",
+                    "key_points": art.key_points
+                })
+        
+        session.add(event)
+        session.commit()
+
+        
+        if not summary_inputs:
+            event.is_active = False
+            event.status = EventStatus.ARCHIVED
+            session.add(event)
+            session.commit()
+            logger.warning("   -> No key points available for summary.")
+            return
+
+        try:
+            # Call LLM to write the Title and Summary
+            # We pass 'None' as previous_summary to force a fresh perspective
+            event_summary = await self.enhancer.summarize_event(summary_inputs, previous_summary=None)
+            if not event_summary:
+                event.is_active = False
+                event.status = EventStatus.ARCHIVED
+                session.add(event)
+                session.commit()
+                logger.error(f"   -> Summary generation failed: No Summary!")
+                return
+            # Apply results
+            event.title = event_summary.title # Crucial: New Event needs a New Title
+            event.subtitle = event_summary.subtitle
+            event.summary = event_summary.summary
+            event.ai_impact_score = event_summary.impact_score
+            event.ai_impact_reasoning = event_summary.impact_reasoning
+            event.last_summarized_at = datetime.now(timezone.utc)
+            event.status = EventStatus.ENHANCED # Ready for Publisher
+            
+            session.add(event)
+            session.commit()
+            logger.success(f"   -> Enhanced: '{event.title}' (Impact: {event.ai_impact_score})")
+            
+        except Exception as e:
+            logger.error(f"   -> Summary generation failed: {e}")
