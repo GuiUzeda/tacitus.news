@@ -31,6 +31,7 @@ from news_events_lib.models import (
     MergeProposalModel, 
     EventStatus
 )
+from scripts.check_blocks import check_blocks  # 👈 Import the script
 
 console = Console()
 settings = Settings()
@@ -60,10 +61,11 @@ class EditorialCLI:
             console.print("[5] Queue Manager (Retry, Reset, Monitor)")
             console.print("[6] Recalculate ALL Scores")
             console.print("[7] Find & Merge Duplicates")
+            console.print("[8] Check for Blocking (403/429)")
             
             console.print("\nq: Quit")
 
-            choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "6", "7", "q"])
+            choice = Prompt.ask("Select Mode", choices=["1", "2", "3", "4", "5", "6", "7", "8", "q"])
 
             if choice == "1": self.view_main_page_control()
             elif choice == "2": self.review_waiting_events()
@@ -72,6 +74,7 @@ class EditorialCLI:
             elif choice == "5": self.queue_manager()
             elif choice == "6": self.recalc_all_scores()
             elif choice == "7": self.merge_duplicate_events()
+            elif choice == "8": check_blocks(); Prompt.ask("\nPress Enter...")
             elif choice == "q": sys.exit(0)
 
     def _print_dashboard_header(self):

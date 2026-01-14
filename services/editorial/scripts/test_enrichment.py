@@ -8,7 +8,7 @@ from loguru import logger
 # Add service root to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from news_events_lib.models import ArticleModel, JobStatus
+from news_events_lib.models import ArticleModel, JobStatus, ArticleContentModel
 from core.models import ArticlesQueueModel, ArticlesQueueName
 from domain.enriching import EnrichingDomain
 
@@ -56,25 +56,61 @@ async def main():
     
     loop = asyncio.get_running_loop()
     async with aiohttp.ClientSession(headers=domain.headers) as http_session:
-        # This is the core method we want to test
-        await domain._process_single_job(loop, http_session, job)
+        # Step 1: Fetch & CPU
+        # _process_single_job_fetch_and_cpu returns (job, result_dict, needs_refilter)
+        job, result, needs_refilter = await domain._process_single_job_fetch_and_cpu(loop, http_session, job)
+
+        if not result:
+            print(f"❌ Fetch/CPU Failed: {job.msg}")
+            domain.shutdown()
+            return
+
+        # Step 2: LLM Analysis (Simulating Batch Phase)
+        print("🧠 Running LLM Analysis...")
+        
+        # Prepare article for LLM (as done in process_batch)
+        article.title = result.get("extracted_title") or article.title
+        if not article.contents:
+             article.contents = [ArticleContentModel(content=result["content"])]
+        else:
+             article.contents[0].content = result["content"]
+        
+        # Call LLM directly
+        try:
+            llm_text = f"{article.title}\n\n{article.contents[0].content}"
+            llm_outputs = await domain.llm.analyze_articles_batch([llm_text])
+            if llm_outputs:
+                result["llm_output"] = llm_outputs[0]
+        except Exception as e:
+            print(f"⚠️ LLM Failed: {e}")
 
     # 4. Display Results
     print("\n" + "="*50)
     print("📊 ENRICHMENT RESULTS")
     print("="*50)
     
-    if job.status == JobStatus.PENDING and job.queue_name == ArticlesQueueName.CLUSTER:
-        print("✅ Status: SUCCESS (Moved to CLUSTER)")
-    else:
-        print(f"❌ Status: {job.status}")
-        print(f"⚠️  Message: {job.msg}")
+    # Apply result to article object for display (simulating _apply_enrichment_result without DB)
+    if (not article.title or article.title.lower() in ["no title", "unknown"]) and result.get("extracted_title"):
+        article.title = result["extracted_title"]
+    
+    article.embedding = result["embedding"]
+    article.interests = result["interests"]
+    article.entities = result["entities"]
+    
+    llm_out = result.get("llm_output")
+    if llm_out:
+        article.summary = llm_out.summary
+        article.stance = llm_out.stance
+        article.clickbait_score = llm_out.clickbait_score
+        # Merge entities
+        if llm_out.entities:
+             # Flatten entities from LLM
+             llm_entities = [item for sublist in llm_out.entities.values() for item in sublist]
+             article.entities = list(set((article.entities or []) + llm_entities))
 
-    print("-" * 50)
-    print(f"🏷️  Extracted Title:   {article.title}")
-    print(f"📝 Extracted sutitle: {article.subtitle}")
-    print(f"📝 Extracted Summary: {article.summary}")
-    print(f"📅 Published Date:     {article.published_date}")
+    print(f"🏷️  Title:         {article.title}")
+    print(f"📝 Summary:       {article.summary}")
+    print(f"📅 Published:     {result.get('published_date')}")
     print(f"🔗 Original URL:      {article.original_url}")
     
     print("-" * 50)
@@ -90,6 +126,12 @@ async def main():
         print(f"🔢 Embedding: Generated (Size: {len(article.embedding)})")
     else:
         print("🔢 Embedding: None")
+
+    if llm_out:
+        print("-" * 50)
+        print(f"🤖 LLM Stance:    {article.stance}")
+        print(f"🎣 Clickbait:     {article.clickbait_score}")
+        print(f"🔑 Key Points:    {llm_out.key_points}")
 
     if article.contents:
         content_preview = article.contents[0].content[:300].replace('\n', ' ')

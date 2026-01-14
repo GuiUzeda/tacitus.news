@@ -6,20 +6,25 @@ import asyncio
 from functools import wraps
 from unittest.mock import Base
 from loguru import logger
-from typing import Dict, List, Optional, Any
-from google import genai
-from google.genai import types
+from typing import Dict, List, Optional, Any, Type, Literal
+
 import pydantic
-from pydantic import BaseModel, field_validator, Field
+from pydantic import BaseModel, ValidationError, field_validator, Field
 import random
+import litellm
+import warnings
 
 # Initialize Client
 from config import Settings
 
 settings = Settings()
-client = genai.Client(api_key=settings.gemini_api_key)
+
+
+# Suppress Pydantic serializer warnings coming from LiteLLM/Pydantic integration
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
 
 # --- Decorators ---
+
 
 def with_retry(max_retries=5, base_delay=30):
     def decorator(func):
@@ -37,54 +42,234 @@ def with_retry(max_retries=5, base_delay=30):
 
                     if is_429 or is_503 or is_502:
                         if attempt == max_retries - 1:
-                            raise e # Re-raise on last attempt
-                        
+                            raise e  # Re-raise on last attempt
+
                         # Exponential backoff with jitter could be added, here we use simple linear/exp mix
-                        wait = base_delay * (2 ** attempt) 
-                        
+                        wait = base_delay * (2**attempt)
+
                         # Check for specific retry delay in message
-                        match = re.search(r"['\"]retrydelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", msg)
+                        match = re.search(
+                            r"['\"]retrydelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]",
+                            msg,
+                        )
                         if match:
                             try:
-                                wait = (float(match.group(1)) + random.randint(0, 120)) * (2 ** attempt) 
+                                wait = (
+                                    float(match.group(1)) + random.randint(0, 30)
+                                ) * (2**attempt)
                             except ValueError:
                                 pass
-                        
+
                         if is_429:
-                            logger.warning(f"⚠️ API Rate Limit (429). Retrying in {wait:.2f}s...")
+                            logger.warning(
+                                f"⚠️ API Rate Limit (429). Retrying in {wait:.2f}s..."
+                            )
                         elif is_502:
-                            logger.warning(f"⚠️ API Bad Gateway (502). Retrying in {wait:.2f}s...")
+                            logger.warning(
+                                f"⚠️ API Bad Gateway (502). Retrying in {wait:.2f}s..."
+                            )
                         else:
-                            logger.warning(f"⚠️ API Service Unavailable (503). Retrying in {wait:.2f}s...")
+                            logger.warning(
+                                f"⚠️ API Service Unavailable (503). Retrying in {wait:.2f}s..."
+                            )
                         await asyncio.sleep(wait)
                     else:
-                        raise e # Non-transient error, raise immediately
+                        raise e  # Non-transient error, raise immediately
             return None
+
         return wrapper
+
     return decorator
+
+if hasattr(litellm, "suppress_debug_info"):
+    litellm.suppress_debug_info = True
+
+class LLMRouter:
+    def __init__(self):
+        
+        os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
+        os.environ["GROQ_API_KEY"] = settings.groq_api_key
+        # os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+        
+        # 1. Define Model Tiers (Priority: Cheap -> Reliable -> Smart)
+        self.model_fallbacks = {
+            "intern": [
+                "gemini/gemma-3-4b-it",
+                "groq/llama-3.1-8b-instant",
+     
+            ],
+            "mid": [
+                "gemini/gemma-3-12b-it",
+                "groq/moonshotai/kimi-k2-instruct",
+                "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
+
+            ],
+            "senior": [
+                "gemini/gemma-3-27b-it",
+                "groq/llama-3.3-70b-versatile",
+                "groq/openai/gpt-oss-20b",
+            ],
+        }
+        
+        self._register_unknown_models()
+
+    def _register_unknown_models(self):
+        """
+        Manually registers new models that LiteLLM doesn't know about yet
+        to prevent 'LLM Provider NOT provided' or Cost Calculation errors.
+        """
+        # Base config
+        base_config = {
+            "max_tokens": 8192, 
+            "input_cost_per_token": 0.0, 
+            "output_cost_per_token": 0.0, 
+            "mode": "chat"
+        }
+
+        # Flatten all models and register them
+        for tier_models in self.model_fallbacks.values():
+            for model_id in tier_models:
+                # Determine provider from prefix
+                provider = "openai"
+                if "/" in model_id:
+                    provider = model_id.split("/", 1)[0]
+                
+                config = base_config.copy()
+                config["litellm_provider"] = provider
+
+                # Register the full ID (e.g. gemini/gemma-3-...)
+                if model_id not in litellm.model_cost:
+                    litellm.model_cost[model_id] = config
+                    # Also register the stripped name just in case (e.g. gemma-3-...)
+                    if "/" in model_id:
+                        stripped = model_id.split("/", 1)[1]
+                        if stripped not in litellm.model_cost:
+                            litellm.model_cost[stripped] = config
+
+    async def generate(
+        self,
+        model_tier: str,
+        messages: List[Dict[str, str]],
+        response_model: Optional[Type[BaseModel]] = None,
+        temperature: float = 0.1,
+        json_mode: bool = False,
+        global_max_retries: int = 2,  # How many times to restart the ENTIRE chain
+    ) -> Any:
+
+        candidate_models = self.model_fallbacks.get(model_tier, self.model_fallbacks["senior"])
+
+        last_exception = None
+
+        # --- OUTER LOOP: The "Catastrophe" Safety Net ---
+        # If all models fail, we wait and try the whole chain again.
+        for global_attempt in range(global_max_retries):
+
+            # --- INNER LOOP: The "Fallback" Logic ---
+            for model in candidate_models:
+                try:
+                    logger.debug(f"Attempting {model} (Global Try: {global_attempt+1})")
+
+                    params = {
+                        "model": model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        'max_retries': 2
+                    }
+                    # if json_mode:
+                    #     params["response_format"] = {"type": "json_object"}
+
+                    # Execute
+                    response = await litellm.acompletion(**params)
+                    content = response.choices[0].message.content
+
+                    # Validate (if Pydantic model provided)
+                    if response_model:
+                        clean_content = self._clean_json(content)
+                        try:
+                            return response_model.model_validate_json(clean_content)
+                        except ValidationError as ve:
+                            logger.warning(
+                                f"Validation failed for {model}: {ve}. Moving to next model..."
+                            )
+                            raise ve  # Trigger the 'except' block below to continue loop
+
+                    return content  # Success!
+
+                except Exception as e:
+                    # Capture specific errors to decide if we should warn or error
+                    err_msg = str(e).lower()
+                    if "429" in err_msg or "rate limit" in err_msg:
+                        logger.warning(f"Model {model} hit Rate Limit. Falling back...")
+                    elif "validation" in err_msg:
+                        logger.warning(
+                            f"Model {model} failed validation. Falling back..."
+                        )
+                    else:
+                        logger.error(f"Model {model} failed with error: {e}")
+
+                    last_exception = e
+                    continue  # Try the next model in the list
+
+            # If we exit the inner loop, it means ALL models in the list failed.
+            # We check if we have global retries left.
+            if global_attempt < global_max_retries - 1:
+                wait_time = (
+                    30 + (global_attempt * 20) + random.randint(0, 10)
+                )  # 30s, 50s...
+                logger.critical(
+                    f"⚠️ ALL models failed. Cooling down for {wait_time}s before restarting chain..."
+                )
+                await asyncio.sleep(wait_time)
+            else:
+                logger.critical(
+                    "❌ FATAL: All models and all global retries exhausted."
+                )
+        if last_exception:
+            # If we get here, everything truly failed
+            raise last_exception
+
+    def _clean_json(self, text: str) -> str:
+        # (Same cleaning logic as before)
+        import re
+
+        text = re.sub(r"```(json)?|```", "", text).strip()
+        text = re.sub(r"(:\s*)“", r'\1"', text)
+        text = re.sub(r"”(\s*[,}])", r'"\1', text)
+        return text
+
 
 # --- Pydantic Schemas ---
 
+
 class LLMNewsOutputSchema(BaseModel):
-    summary: str
-    key_points: List[str]
-    stance: float 
-    stance_reasoning: str
-    clickbait_score: float
-    clickbait_reasoning: str
-    entities: Dict[str, List[str]]
-    main_topics: List[str]
-    title: str
-    subtitle: str
+    status: Literal["valid", "error"] = "valid"
+    error_message: Optional[str] = None
+    summary: str = ""
+    key_points: List[str] = []
+    stance: float = 0.0
+    stance_reasoning: str = ""
+    clickbait_score: float = 0.0
+    clickbait_reasoning: str = ""
+    entities: Dict[str, List[str]] = {}
+    main_topics: List[str] = []
+    title: str = ""
+    subtitle: str = ""
+
+
 class LLMBatchNewsOutputSchema(BaseModel):
     results: List[LLMNewsOutputSchema]
+
+
 class EventMatchSchema(BaseModel):
     """
     Schema for the Event Co-reference Resolution.
     """
+
     same_event: bool
     confidence_score: float
-    key_matches: Dict[str, str] = Field(default_factory=dict)  # e.g., {'actors': 'Match', 'time': 'Mismatch'}
+    key_matches: Dict[str, str] = Field(
+        default_factory=dict
+    )  # e.g., {'actors': 'Match', 'time': 'Mismatch'}
     discrepancies: Optional[str] = None
     reasoning: str
 
@@ -104,32 +289,45 @@ class EventMatchSchema(BaseModel):
             return {k: (str(val) if val is not None else "N/A") for k, val in v.items()}
         return v
 
+
 class BatchMatchResult(BaseModel):
     proposal_id: str
     same_event: bool
     confidence_score: float
     reasoning: str
 
+
 class BatchMatchResponse(BaseModel):
     results: List[BatchMatchResult]
-    
+
+
 class LLMSummaryResponse(BaseModel):
     title: str
     subtitle: Optional[str] = None
     category: str
     impact_reasoning: str
     impact_score: int
-    summary: Dict[str, Any] # Can contain 'left', 'right', 'center', 'bias'
-    
+    summary: Dict[str, Any]  # Can contain 'left', 'right', 'center', 'bias'
+
+
+class FilterResponse(BaseModel):
+    ids: List[int]
+
+
+class MergeSummaryResponse(BaseModel):
+    title: str
+    subtitle: Optional[str] = None
+    summary: Dict[str, Any]
+
 
 # --- Classes ---
 
-class CloudNewsFilter:
-    def __init__(self):
-        # The "Intern" Model
-        self.model_id = "gemma-3-4b-it"
 
-    @with_retry(max_retries=5, base_delay=30)
+class CloudNewsFilter:
+    def __init__(self, router: LLMRouter = LLMRouter()):
+        self.router = router
+
+    @with_retry(max_retries=3)
     async def filter_batch(self, articles_title: List[dict]) -> List[int]:
         """
         Takes a list of 50 raw entries. Returns ONLY the relevant ones.
@@ -169,48 +367,41 @@ class CloudNewsFilter:
         Input Headlines:
         {items_str}
         
-        Output JSON: Return a list of the integer IDs that PASSED.
-        Answer ONLY the JSON list.
-        JSON Schema: [0, 2, 5, 12]
+        Output JSON: Return a JSON object with a key 'ids' containing the list of the integer IDs that PASSED.
+        Answer ONLY the JSON object.
+        JSON Schema: {{ "ids": [0, 2, 5, 12] }}
         """
 
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model=self.model_id,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.1,  # Low temp for strict logic
-                ),
+            result = await self.router.generate(
+                model_tier="intern",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=FilterResponse,
+                temperature=0.1,
+                json_mode=True
             )
             
-            text_response = response.text
-            if not text_response:
-                logger.warning("CloudNewsFilter received empty response.")
-                return []
-
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            accepted_ids = json.loads(clean_text)
+            accepted_ids = result.ids
 
             accepted_ids = [
-                i for i in accepted_ids if isinstance(i, int) and i < len(articles_title)
+                i
+                for i in accepted_ids
+                if isinstance(i, int) and i < len(articles_title)
             ]
             return accepted_ids
-        
-        except json.JSONDecodeError as e:
-            logger.error(f"CloudNewsFilter JSON Error: {e} | Raw: {response.text if response else 'None'}")
-            return []
+
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"CloudNewsFilter Error: {e}")
-            return []
+            raise e
+
 
 class CloudNewsAnalyzer:
-    def __init__(self):
+    def __init__(self, router: LLMRouter = LLMRouter()):
         # The "Senior" Model
-        self.model_id = "gemma-3-27b-it"
-    
+        self.router = router
+
+
     def _smart_truncate(self, text: str, limit: int = 6000) -> str:
         """
         Truncates text while preserving the beginning (Lead) and the end (Conclusion).
@@ -218,16 +409,18 @@ class CloudNewsAnalyzer:
         """
         if not text or len(text) <= limit:
             return text
-        
+
         head_len = int(limit * 0.7)
         tail_len = int(limit * 0.3)
-        
-        # Ensure we don't overlap if limit is weirdly small vs text length, 
+
+        # Ensure we don't overlap if limit is weirdly small vs text length,
         # though the strict check above handles mostly.
         return f"{text[:head_len]}\n\n[...TRUNCATED SECTIONS...]\n\n{text[-tail_len:]}"
 
     @with_retry(max_retries=5, base_delay=30)
-    async def analyze_articles_batch(self, texts: List[str]) -> List[LLMNewsOutputSchema]:
+    async def analyze_articles_batch(
+        self, texts: List[str]
+    ) -> List[LLMNewsOutputSchema]:
         """
         Analyzes multiple articles in a single prompt to save tokens on repeated system instructions.
         """
@@ -242,6 +435,10 @@ class CloudNewsAnalyzer:
         You are an Intelligence Analyst. Analyze the following {len(texts)} articles.
         
         Task: For EACH article provided below, generate a "Briefing Card" in Portuguese.
+        
+        **VALIDATION:**
+        Check if the content is a valid news article.
+        If the text indicates a BLOCK, ERROR, or LOGIN WALL (e.g., "Access Denied", "Cloudflare", "Enable JS", "Subscribe to read", "403 Forbidden"), mark it as ERROR.
         
         **STYLE RULES:**
         1. **High Information Density:** Do not use filler words. Every sentence must contain a fact, number, name, or location.
@@ -258,6 +455,8 @@ class CloudNewsAnalyzer:
 
         JSON Schema for each object:
         {{
+            "status": "valid", // OR "error"
+            "error_message": null, // Reason if error
             "title": "Original title of the article in portuguese",
             "subtitle": "Subtitle/excerpt of the article in portuguese",
             "summary": "Two sentence summary in portuguese",
@@ -276,29 +475,24 @@ class CloudNewsAnalyzer:
         """
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model=self.model_id,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                ),
+            result = await self.router.generate(
+                model_tier="senior",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=LLMBatchNewsOutputSchema,
+                temperature=0.2,
+                json_mode=True
             )
-            
-            text_response = response.text
-            if not text_response:
-                logger.warning("CloudNewsAnalyzer received empty response.")
-                return []
-
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            return LLMBatchNewsOutputSchema.model_validate_json(clean_text).results
-            
-        except pydantic.ValidationError as e:
-            logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
+            return result.results
+        except Exception as e:
+            logger.error(f"CloudNewsAnalyzer Batch Error: {e}")
             raise e
+
     @with_retry(max_retries=5, base_delay=30)
-    async def verify_event_match(self, reference_text: str, candidate_text: str) -> EventMatchSchema | None:
+    async def verify_event_match(
+        self, reference_text: str, candidate_text: str
+    ) -> EventMatchSchema | None:
         """
-        Determines if two texts refer to the EXACT same real-world event 
+        Determines if two texts refer to the EXACT same real-world event
         using Event Co-reference Resolution logic.
         """
         ref_snippet = reference_text[:2500]
@@ -331,47 +525,37 @@ class CloudNewsAnalyzer:
         """
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model="gemma-3-12b-it",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,  # Zero temp for maximum deterministic logic
-                ),
+            result = await self.router.generate(
+                model_tier="mid",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=EventMatchSchema,
+                temperature=0.0,
+                json_mode=True
             )
-            
-            text_response = response.text
-            if not text_response:
-                return None
-
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            return EventMatchSchema.model_validate_json(clean_text)
-
-        except pydantic.ValidationError as e:
-            logger.error(f"Event Verification Schema Error: {e}")
-            return None
+            return result
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"Event Verification Error: {e}")
-            return None
+            raise e
 
     @with_retry(max_retries=5, base_delay=30)
-    async def verify_batch_matches(self, reference_text: str, candidates: List[Dict[str, str]]) -> List[BatchMatchResult]:
+    async def verify_batch_matches(
+        self, reference_text: str, candidates: List[Dict[str, str]]
+    ) -> List[BatchMatchResult]:
         """
         Verifies one Reference Article against Multiple Candidates in a SINGLE API call.
-        
+
         candidates input format: [{'id': 'proposal_uuid', 'text': 'article content...'}, ...]
         """
         if not candidates:
             return []
 
         # 1. Build the Batch Prompt
-        ref_snippet = reference_text[:2000] # Slightly shorter to save tokens
+        ref_snippet = reference_text[:2000]  # Slightly shorter to save tokens
         candidates_str = ""
-        
+
         for cand in candidates:
             # Truncate candidate text to save context
-            snippet = cand['text'][:1500] 
+            snippet = cand["text"][:1500]
             candidates_str += f"""
             ---
             [CANDIDATE ID: {cand['id']}]
@@ -404,41 +588,25 @@ class CloudNewsAnalyzer:
                 {{ "proposal_id": "...", "same_event": false, "confidence_score": 1.0, "reasoning": "Different dates" }}
             ]
         }}
+        Answer ONLY the VALID JSON.
         """
-        response=None
+        response = None
         try:
-            # Note: Using the Flash model is usually better for high-volume batch tasks if available, 
-            # but sticking to your configured model is fine if it supports JSON mode well.
-            response = await client.aio.models.generate_content(
-                model="gemma-3-12b-it", # Or gemini-1.5-flash for speed
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    response_schema=BatchMatchResponse # Use the Pydantic schema
-                ),
+            result = await self.router.generate(
+                model_tier="mid",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=BatchMatchResponse,
+                temperature=0.0,
+                json_mode=True
             )
-            
-            text_response = response.text
-            if not text_response:
-                logger.warning("CloudNewsAnalyzer received empty response.")
-                return []
-
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            # If using response_schema, the output is already strictly formatted, 
-            # but we parse it safely just in case using the model_validate logic or direct json load
-            data = json.loads(clean_text)
-            return [BatchMatchResult(**item) for item in data.get('results', [])]
-        except pydantic.ValidationError as e:
-            logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
-            return []
+            return result.results
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"CloudNewsAnalyzer Error: {e}")
-            return []
+            raise e
 
-
-    async def batch_verify_events(self, reference_text: str, candidates: List[str]) -> List[EventMatchSchema]:
+    async def batch_verify_events(
+        self, reference_text: str, candidates: List[str]
+    ) -> List[EventMatchSchema]:
         """
         Checks a list of candidate texts against a reference text in parallel
         to find all that refer to the same event.
@@ -446,14 +614,14 @@ class CloudNewsAnalyzer:
         """
         if not candidates:
             return []
-            
+
         tasks = []
         for candidate in candidates:
             # We use a semaphore or rate limit logic ideally, but here we just gather
             tasks.append(self.verify_event_match(reference_text, candidate))
-        
+
         results = await asyncio.gather(*tasks)
-        
+
         # Filter out errors (None) but keep the schema results
         valid_results = [r for r in results if r is not None]
         return valid_results
@@ -461,7 +629,7 @@ class CloudNewsAnalyzer:
     @with_retry(max_retries=5, base_delay=30)
     async def analyze_article(self, text: str) -> LLMNewsOutputSchema | None:
         today_context = datetime.now().strftime("%A, %d de %B de %Y")
-        
+
         # IMPROVEMENT: Use Smart Truncation here too
         truncated_text = self._smart_truncate(text, 25000)
 
@@ -517,36 +685,26 @@ class CloudNewsAnalyzer:
         - **Ranges from 0.0 (the title is factual and matches the facts) to 1.0 (the title is a clickbait)
         
         **Always answer in portuguese.**
+        Answer ONLY the VALID JSON.
         """
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model=self.model_id,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                ),
+            result = await self.router.generate(
+                model_tier="senior",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=LLMNewsOutputSchema,
+                temperature=0.2,
+                json_mode=True
             )
-            
-            text_response = response.text
-            if not text_response:
-                logger.warning("CloudNewsAnalyzer received empty response.")
-                return None
-
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            return LLMNewsOutputSchema.model_validate_json(clean_text)
-            
-        except pydantic.ValidationError as e:
-            logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
-            return None
+            return result
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"CloudNewsAnalyzer Error: {e}")
-            return None
+            raise e
 
     @with_retry(max_retries=5, base_delay=30)
-    async def summarize_event(self, article_summaries: list[dict], previous_summary: Optional[dict]) -> LLMSummaryResponse | None:
+    async def summarize_event(
+        self, article_summaries: list[dict], previous_summary: Optional[dict]
+    ) -> LLMSummaryResponse | None:
         """
         Takes a list of article summaries (grouped by bias) and generates
         the "Ground News" style comparison.
@@ -554,8 +712,10 @@ class CloudNewsAnalyzer:
         context_str = ""
         for item in article_summaries:
             context_str += f"[{item['bias'].upper()} SOURCE]: {item['key_points']}\n"
-        
-        prev_summary_str = json.dumps(previous_summary) if previous_summary else "None (New Event)"
+
+        prev_summary_str = (
+            json.dumps(previous_summary) if previous_summary else "None (New Event)"
+        )
 
         prompt = f"""
         You are a Senior Journalistic Editor in Brazil.
@@ -585,7 +745,8 @@ class CloudNewsAnalyzer:
         
         **IMPACT SCORING RUBRIC (0-100) - IMPORTANT!:**
         Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
-        - **0-15 (Noise):** Celebrity gossip, viral social media trends, sports results, entertainment releases, food receipes, horoscopes, weather forecasts.
+        - **0 (Completelly inrrelevant):**  Celebrity gossip, viral social media trends, sports results, bbb, reality shows, etc.
+        - **1-15 (Noise):** entertainment releases, food receipes, horoscopes, weather forecasts, tips, etc.
         - **16-40 (Local):** Minor local news, minor crime with no wider implication.
         - **41-60 (Routine):** Standard political statements, economic updates.
         - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
@@ -608,36 +769,29 @@ class CloudNewsAnalyzer:
 
         Answer ONLY the VALID JSON.
         """
-        
+
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model="gemma-3-27b-it",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2
-                )
+            result = await self.router.generate(
+                model_tier="senior",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=LLMSummaryResponse,
+                temperature=0.2,
+                json_mode=True
             )
-            text_response = response.text
-            if not text_response:
-                logger.warning("CloudNewsAnalyzer received empty response.")
-                return None
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            return LLMSummaryResponse.model_validate_json(clean_text)
-        except json.JSONDecodeError as e:
-            logger.error(f"CloudNewsAnalyzer JSON Error: {e} | Raw: {response.text if response else 'None'}")
-            return None 
+            return result
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"Event summarization failed: {e}")
-            return None
-        
+            raise e
+
     @with_retry(max_retries=5, base_delay=30)
-    async def merge_event_summaries(self, target: Dict, sources: List[Dict]) -> Dict | None:
+    async def merge_event_summaries(
+        self, target: Dict, sources: List[Dict]
+    ) -> Dict | None:
         """
         Merges multiple event summaries into one Master Event summary.
         """
+
         def fmt_sum(s):
             if isinstance(s, dict):
                 return s.get("center") or s.get("bias") or str(s)
@@ -674,34 +828,31 @@ class CloudNewsAnalyzer:
                 "bias": "Merged narrative analysis..."
             }}
         }}
-        """
         
+        Answer ONLY the VALID JSON.
+        """
+
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model="gemma-3-27b-it",
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.2)
+            result = await self.router.generate(
+                model_tier="senior",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=MergeSummaryResponse,
+                temperature=0.2,
+                json_mode=True
             )
-            text_response = response.text
-            if not text_response:
-                return None
-            clean_text =  re.sub(r"```(json)?|```", "", text_response).strip()
-            return json.loads(clean_text)
-        except pydantic.ValidationError as e:
-            logger.error(f"Event Verification Schema Error: {e}")
-            return None
+            return result.model_dump()
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"Event Verification Error: {e}")
-            return None 
+            raise e
 
     @with_retry(max_retries=5, base_delay=30)
-    async def verify_event_merge(self, event_a: Dict, event_b: Dict) -> EventMatchSchema | None:
+    async def verify_event_merge(
+        self, event_a: Dict, event_b: Dict
+    ) -> EventMatchSchema | None:
         """
         Verify if TWO EVENTS represent the exact same incident.
-        
+
         Expected Input (event_a/b):
         {
             "title": str,
@@ -711,8 +862,10 @@ class CloudNewsAnalyzer:
             ]
         }
         """
+
         def format_event_articles(articles: List[Dict]) -> str:
-            if not articles: return "No articles."
+            if not articles:
+                return "No articles."
             # Take first 5 articles
             selected = articles[:3]
             output = ""
@@ -751,29 +904,19 @@ class CloudNewsAnalyzer:
                                              // 0.1 = Ambiguous info, unsure.
             "reasoning": "concise explanation"
         }}
+        
+        Answer ONLY the VALID JSON.
         """
         response = None
         try:
-            response = await client.aio.models.generate_content(
-                model="gemma-3-12b-it",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,  # Zero temp for maximum deterministic logic
-                ),
+            result = await self.router.generate(
+                model_tier="mid",
+                messages=[{"role": "user", "content": prompt}],
+                response_model=EventMatchSchema,
+                temperature=0.0,
+                json_mode=True
             )
-            
-            text_response = response.text
-            if not text_response:
-                return None
-
-            clean_text = re.sub(r"```(json)?|```", "", text_response).strip()
-            return EventMatchSchema.model_validate_json(clean_text)
-
-        except pydantic.ValidationError as e:
-            logger.error(f"Event Verification Schema Error: {e}")
-            return None
+            return result
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e) or "502" in str(e):
-                raise e
             logger.error(f"Event Verification Error: {e}")
-            return None 
+            raise e

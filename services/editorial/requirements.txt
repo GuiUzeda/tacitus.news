@@ -9,9 +9,9 @@ beautifulsoup4
 playwright
 trafilatura
 spacy
-google-genai
 tenacity
 sentence_transformers
 websockets
 einops
 brotli
+litellm

@@ -119,6 +119,33 @@ class EnrichingDomain:
         
         # LLM for Phase 2
         self.llm = CloudNewsAnalyzer()
+        
+        # 🚦 NEW: Control concurrency for the LLM 
+        # 12B is heavier than Flash, so we limit to 5 parallel requests to avoid Rate Limits (429)
+        self.llm_semaphore = asyncio.Semaphore(5) 
+
+    def _check_for_blocking(self, html: str) -> Optional[str]:
+        """
+        Checks for common WAF/Blocking signatures in the HTML.
+        Returns the name of the blocker if found, else None.
+        """
+        if not html: return None
+        
+        # Check first 3KB for efficiency (WAF pages are usually small)
+        head = html[:3000].lower()
+        
+        signatures = {
+            "Cloudflare": ["attention required! | cloudflare", "just a moment...", "security by cloudflare", "ray id:", "cloudflare-nginx"],
+            "Incapsula": ["incapsula", "_incapsula_resource"],
+            "Akamai": ["reference #18.", "reference #", "akamai"],
+            "Generic Block": ["please turn javascript on", "checking your browser", "error 1020", "error 1015", "<title>403 forbidden</title>", "<title>access denied</title>", "enable cookies"]
+        }
+        
+        for blocker, sigs in signatures.items():
+            for sig in sigs:
+                if sig in head:
+                    return blocker
+        return None
 
     def shutdown(self):
         self.cpu_executor.shutdown(wait=True)
@@ -132,31 +159,23 @@ class EnrichingDomain:
     async def process_batch(self, session: Session, jobs: List[ArticlesQueueModel]):
         if not jobs: return
 
-
         loop = asyncio.get_running_loop()
         
         # 1. PHASE 1: Fetch & Vectorize (Parallel)
         async with aiohttp.ClientSession(headers=self.headers) as http_session:
-            tasks = []
-            for job in jobs:
-                tasks.append(self._process_single_job_fetch_and_cpu(loop, http_session, job))
-            
-            # List of (job, processing_result, needs_refilter_flag)
+            tasks = [self._process_single_job_fetch_and_cpu(loop, http_session, job) for job in jobs]
             results = await asyncio.gather(*tasks)
 
-        # 2. PHASE 2: LLM Analysis (Batch)
-        # We only send to LLM if: 
-        #   a) Processing succeeded (res is not None)
-        #   b) We are NOT sending it back to Filter (needs_refilter is False)
+        # 2. PHASE 2: LLM Analysis (Concurrent Chunking)
         
         llm_candidates = []
         llm_indices = []
 
+        # Filter valid items
         for i, (job, res, needs_refilter) in enumerate(results):
             if res and not needs_refilter:
-                # Prepare article for LLM
                 art = job.article
-                # Update title/content temporarily in memory for the LLM to read
+                # Apply temporary extracted data for LLM context
                 art.title = res.get("extracted_title") or art.title
                 if not art.contents:
                      art.contents = [ArticleContentModel(content=res["content"])]
@@ -167,19 +186,36 @@ class EnrichingDomain:
                 llm_indices.append(i)
 
         if llm_candidates:
-            logger.info(f"🧠 Sending {len(llm_candidates)} articles to LLM for Summarization/Stance...")
-            try:
-                llm_texts = [f"{art.title}\n\n{art.contents[0].content}" for art in llm_candidates]
-                llm_outputs = await self.llm.analyze_articles_batch(llm_texts)
-                
-                # Apply results back to the `results` list to be saved in Phase 3
-                for k, output in enumerate(llm_outputs):
-                    original_idx = llm_indices[k]
-                    # We inject the LLM output into the result dictionary
-                    results[original_idx][1]["llm_output"] = output
+            logger.info(f"🧠 Processing {len(llm_candidates)} articles with Gemma-12B (Parallel)...")
+            
+            # --- CHUNKING LOGIC ---
+            BATCH_SIZE = 5  # Small chunks prevent context overflow and timeouts
+            chunks = [llm_candidates[i:i + BATCH_SIZE] for i in range(0, len(llm_candidates), BATCH_SIZE)]
+            
+            async def process_chunk(chunk_articles):
+                async with self.llm_semaphore: # Guard against 429 errors
+                    texts = [f"{a.title}\n\n{a.contents[0].content}" for a in chunk_articles]
+                    return await self.llm.analyze_articles_batch(texts)
 
+            # Fire all chunks at once!
+            chunk_tasks = [process_chunk(chunk) for chunk in chunks]
+            
+            try:
+                # Wait for all chunks
+                chunk_results = await asyncio.gather(*chunk_tasks)
+                
+                # Flatten the list of lists: [[A,B], [C,D]] -> [A,B,C,D]
+                flat_outputs = [item for sublist in chunk_results for item in sublist]
+
+                # Map results back to the original jobs
+                for k, output in enumerate(flat_outputs):
+                    if k < len(llm_indices):
+                        original_idx = llm_indices[k]
+                        # Inject result into the Phase 3 pipeline
+                        results[original_idx][1]["llm_output"] = output
+                        
             except Exception as e:
-                logger.error(f"⚠️ LLM Batch Failed: {e}")
+                logger.error(f"⚠️ Concurrent LLM Batch Failed: {e}")
 
         # 3. PHASE 3: Save & Route
         for job, res, needs_refilter in results:
@@ -207,7 +243,7 @@ class EnrichingDomain:
                 if pdate.tzinfo is None:
                     pdate = pdate.replace(tzinfo=timezone.utc)
                 
-                if pdate < datetime.now(timezone.utc) - timedelta(days=7):
+                if pdate < datetime.now(timezone.utc) - timedelta(days=4):
                     job.status = JobStatus.COMPLETED
                     job.msg = "Skipped: Too old (> 7 days)"
                     return job, None, False
@@ -223,10 +259,15 @@ class EnrichingDomain:
                     # If we have content, we assume it's raw text
                 else:
                     # 🌐 Scrape (Pass 1)
+                    use_browser = False
                     try:
                         timeout = aiohttp.ClientTimeout(total=30)
                         async with http_session.get(article.original_url, timeout=timeout) as resp:
-                            if resp.status == 200:
+                            if resp.status in [403, 429, 503]:
+                                logger.warning(f"⚠️ HTTP {resp.status} for {article.id}. Triggering Browser Fallback...")
+                                use_browser = True
+                            
+                            elif resp.status == 200:
                                 # Check Content-Type to avoid binary files (images, PDFs)
                                 ctype = resp.headers.get("Content-Type", "").lower()
                                 if "text" not in ctype and "html" not in ctype and "json" not in ctype:
@@ -237,22 +278,32 @@ class EnrichingDomain:
 
                                 html = await resp.text(errors="replace")
                                 
-                                # SPA Fallback
-                                if len(html) < 500 or "<div id=\"root\"></div>" in html:
-                                    html = await BrowserFetcher.fetch(article.original_url)
+                                # SPA / Empty Fallback
+                                if not html or len(html) < 500 or "<div id=\"root\"></div>" in html:
+                                    logger.warning(f"⚠️ Empty/SPA HTML for {article.id}. Triggering Browser Fallback...")
+                                    use_browser = True
 
                             else:
                                 job.status = JobStatus.FAILED
                                 job.msg = f"HTTP {resp.status}"
                                 return job, None, False
                     except Exception as e:
-                        job.status = JobStatus.FAILED
-                        job.msg = f"Fetch Error: {str(e)[:50]}"
-                        return job, None, False
+                        logger.warning(f"Standard Fetch failed for {article.id}: {e}. Triggering Browser Fallback...")
+                        use_browser = True
+
+                    if use_browser:
+                        html = await BrowserFetcher.fetch(article.original_url)
 
                 if not html:
                     job.status = JobStatus.FAILED
                     job.msg = "Empty HTML"
+                    return job, None, False
+
+                # 🛡️ BLOCKING DETECTION
+                blocker = self._check_for_blocking(html)
+                if blocker:
+                    job.status = JobStatus.FAILED
+                    job.msg = f"Blocked: {blocker}"
                     return job, None, False
 
                 # 2. CPU Task (Embeddings)
@@ -297,6 +348,11 @@ class EnrichingDomain:
         # 2. LLM Data (If available)
         llm_out:LLMNewsOutputSchema | None= result.get("llm_output")
         if llm_out:
+            if llm_out.status == "error":
+                job.status = JobStatus.FAILED
+                job.msg = f"LLM Blocked: {llm_out.error_message}"
+                return
+
             article.summary = llm_out.summary
             article.stance = llm_out.stance
             article.stance_reasoning = llm_out.stance_reasoning

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     save_hourly: bool = True
     domains: set[str] = {"localhost"}
     gemini_api_key: str = ""
+    groq_api_key: str = ""
     script_dir: Path = script_dir
     similarity_strict: float = 0.05
     similarity_loose: float = 0.18

@@ -28,7 +28,7 @@ class NewsReviewerWorker(BaseQueueWorker):
         self.domain = NewsReviewerDomain()
 
         # Configuration
-        self.concurrency = 10
+        self.concurrency = 5
 
         # Initialize BaseWorker (Used mainly for structure, run() is overridden)
         super().__init__(
