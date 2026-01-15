@@ -186,18 +186,14 @@ class NewsEnhancerDomain:
             return event.summary.get("center") or event.summary.get("bias")
         return None
 
-# [Add this to NewsEnhancerDomain class]
 
-    async def enhance_event_direct(self, session: Session, event: NewsEventModel):
+    async def enhance_event_direct(self, session: Session, event: NewsEventModel, commit: bool = True): 
         """
-        Forces an immediate enhancement (Analysis + Summarization) for a specific event,
-        bypassing queues and debounce timers. Used by the Splitter.
+        Forces an immediate enhancement. Supports commit=False for atomic transactions.
         """
         logger.info(f"⚡ Direct Enhance started for: {event.title}")
 
-        # 1. PHASE 1: Micro-Analysis (Ensure all articles have metadata)
-        # The splitter moved articles here, but they might already be analyzed.
-        # We check for any articles missing 'key_points' or 'stance'.
+        # 1. PHASE 1: Micro-Analysis
         unprocessed_articles = [
             a for a in event.articles 
             if not a.key_points or not a.stance_reasoning
@@ -205,16 +201,11 @@ class NewsEnhancerDomain:
 
         if unprocessed_articles:
             logger.info(f"   -> Analyzing {len(unprocessed_articles)} moved articles...")
-            # Reuse the existing batch logic
-            # We assume self.batch_size exists or hardcode it to 5
             BATCH_SIZE = 5
             for i in range(0, len(unprocessed_articles), BATCH_SIZE):
                 batch =  unprocessed_articles[i : i + BATCH_SIZE]
                 try:
-                    # We await the LLM call directly
                     outputs = await self.enhancer.analyze_articles_batch([f"{a.title}\n\n{a.contents[0].content}" for a in batch])
-                    
-                    # Save results to DB immediately
                     for article, output in zip(batch, outputs):
                         article.stance = output.stance
                         article.stance_reasoning = output.stance_reasoning
@@ -226,66 +217,72 @@ class NewsEnhancerDomain:
                             for entity_list in output.entities.values():
                                 all_entities.extend(entity_list)
                         article.entities = list(set(all_entities))  
-                        article.summary = output.summary # Short summary
+                        article.summary = output.summary
                         session.add(article)
-                    session.commit()
+                    
+                    if commit:
+                        session.commit()
+                    else:
+                        session.flush()
+
                 except Exception as e:
                     logger.error(f"   -> Batch analysis failed: {e}")
 
-        # 2. PHASE 2: Aggregation (Math)
-        # Recalculate stats based on the new grouping
-        from domain.aggregator import EventAggregator # Local import to avoid circular dep
-        
-        # Reset aggregates before rebuilding (Optional, but safer for splits)
+        # 2. PHASE 2: Aggregation
+        # Reset aggregates before rebuilding
         event.interest_counts = {}
         event.main_topic_counts = {}
         summary_inputs = []
         for art in event.articles:
-            EventAggregator.aggregate_basic_stats(event, art) # Re-sums counts
+            EventAggregator.aggregate_basic_stats(event, art) 
             EventAggregator.aggregate_interests(event, art.interests)
             EventAggregator.aggregate_main_topics(event, art.main_topics)
             if art.key_points and art.newspaper:
-                # Group by bias (simplified for direct mode)
                 summary_inputs.append({
                     "bias": art.newspaper.bias or "center",
                     "key_points": art.key_points
                 })
         
         session.add(event)
-        session.commit()
-
+        if commit:
+            session.commit()
+        else:
+            session.flush()
         
         if not summary_inputs:
             event.is_active = False
             event.status = EventStatus.ARCHIVED
             session.add(event)
-            session.commit()
+            if commit: session.commit()
+            else: session.flush()
             logger.warning("   -> No key points available for summary.")
             return
 
         try:
-            # Call LLM to write the Title and Summary
-            # We pass 'None' as previous_summary to force a fresh perspective
             event_summary = await self.enhancer.summarize_event(summary_inputs, previous_summary=None)
             if not event_summary:
                 event.is_active = False
                 event.status = EventStatus.ARCHIVED
                 session.add(event)
-                session.commit()
+                if commit: session.commit()
+                else: session.flush()
                 logger.error(f"   -> Summary generation failed: No Summary!")
                 return
-            # Apply results
-            event.title = event_summary.title # Crucial: New Event needs a New Title
+            
+            event.title = event_summary.title 
             event.subtitle = event_summary.subtitle
             event.summary = event_summary.summary
             event.ai_impact_score = event_summary.impact_score
             event.ai_impact_reasoning = event_summary.impact_reasoning
             event.last_summarized_at = datetime.now(timezone.utc)
-            event.status = EventStatus.ENHANCED # Ready for Publishe
-            
+            event.status = EventStatus.ENHANCED 
             
             session.add(event)
-            session.commit()
+            if commit:
+                session.commit()
+            else:
+                session.flush()
+
             logger.success(f"   -> Enhanced: '{event.title}' (Impact: {event.ai_impact_score})")
             
         except Exception as e:

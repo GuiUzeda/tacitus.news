@@ -1,3 +1,4 @@
+from functools import partial
 from app.common.mixins import DBSessionMixin
 from contextlib import contextmanager
 from typing import (
@@ -20,11 +21,12 @@ from fastapi_pagination.types import (
 )
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Row, delete, func, select, update
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.expression import Executable, Select, Update
 from sqlalchemy.orm import DeclarativeBase
+
 
 class BaseManager(DBSessionMixin):
     """Base data manager class responsible for operations over database."""
@@ -49,13 +51,13 @@ class BaseManager(DBSessionMixin):
         pass
         return stmt
 
-    def add_one(self, model: DeclarativeBase) -> UUID :
+    def add_one(self, model: DeclarativeBase) -> UUID:
         # model.data_hora = datetime.utcnow()  # type: ignore
         with self.db_transaction():
             self.db_session.add(model)
         return model.id  # type: ignore
 
-    def add_all(self, models) -> List[UUID ]:
+    def add_all(self, models) -> List[UUID]:
         with self.db_transaction():
             self.db_session.add_all(models)
         return [model.id for model in models]
@@ -64,16 +66,16 @@ class BaseManager(DBSessionMixin):
         return self.db_session.scalar(select_stmt)
 
     def get_all_scalar(self, select_stmt: Executable) -> List[Any]:
-        return self.db_session.scalars(select_stmt).unique().all()
+        return list(self.db_session.scalars(select_stmt).unique().all())
 
-    def get_all(self, select_stmt: Executable) -> List[Any]:
-        return self.db_session.execute(select_stmt).all()
+    def get_all(self, select_stmt: Executable) -> List[Row[Any]]:
+        return list(self.db_session.execute(select_stmt).all())
 
     def get_paginated(
         self,
-        select_stmt: Select,
-        additional_data: AdditionalData = None,
-        transformer: Optional[SyncItemsTransformer] = None,
+        select_stmt,
+        additional_data: Optional[AdditionalData] = None,
+        transformer: Optional[partial[List[Any]]]  = None,
         params: AbstractParams | None = None,
         unique: bool = True,
     ) -> Page[Any]:
@@ -89,9 +91,9 @@ class BaseManager(DBSessionMixin):
 
     async def aget_paginated(
         self,
-        select_stmt: Select,
-        additional_data: AdditionalData = None,
-        transformer: Optional[AsyncItemsTransformer] = None,
+        select_stmt,
+        additional_data: AdditionalData | None = None,
+        transformer: Optional[partial[List[Any]]] = None,
     ) -> Page[Any]:
         return paginate(
             self.db_session,
@@ -100,7 +102,7 @@ class BaseManager(DBSessionMixin):
             transformer=transformer,  # type: ignore
         )
 
-    def get_from_tvf(self, model: Type[DeclarativeBase], *args: Any) -> List[Type[DeclarativeBase]]:
+    def get_from_tvf(self, model, *args: Any) -> List[Row[Any]]:
         """Query from table valued function.
 
         This is a wrapper function that can be used to retrieve data from
@@ -127,7 +129,7 @@ class BaseManager(DBSessionMixin):
 
     def update(
         self,
-        model: Type[DeclarativeBase],
+        model,
         data: dict,
         model_id: Optional[int | UUID] = None,
         stmt: Optional[Update] = None,
@@ -144,12 +146,10 @@ class BaseManager(DBSessionMixin):
                 execution_options={"synchronize_session": "fetch"},
             )
             if validate_row_count:
-                if not result.rowcount or result.rowcount == 0:
+                if not result.rowcount or result.rowcount == 0:  # type: ignore
                     raise Exception("No rows affected")
 
-    def delete(
-        self, model: Type[DeclarativeBase], model_id: UUID | int = 0, stmt=None
-    ) -> None:
+    def delete(self, model, model_id: UUID | int = 0, stmt=None) -> None:
         if stmt is None:
             stmt = delete(model).where(model.id == model_id)
         with self.db_transaction():

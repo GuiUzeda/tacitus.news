@@ -127,6 +127,7 @@ class NewsCluster:
     ):
         """
         Funde o Evento A (Source) no Evento B (Target) preservando TODO o histórico.
+        Includes 'Inherit Immunity' to prevent re-merging with previously blocked events.
         """
         logger.info(f"🧬 MERGING: {source_event.title} -> {target_event.title}")
 
@@ -182,6 +183,7 @@ class NewsCluster:
         session.add(source_event)
 
         # 4. Limpar Propostas e Filas do Morto
+        # A. Rejeitar propostas pendentes (elas não fazem mais sentido)
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
@@ -193,12 +195,66 @@ class NewsCluster:
             .values(status=JobStatus.REJECTED, reasoning="Source event was merged.", updated_at=datetime.now(timezone.utc))
         )
 
-        # Remove jobs pendentes do evento morto para não travar workers
+        # B. Remove jobs pendentes do evento morto para não travar workers
         session.execute(
             delete(EventsQueueModel).where(EventsQueueModel.event_id == source_event.id)
         )
 
-        # 5. Trigger Next Steps (Para o Sobrevivente)
+        # 5. INHERIT IMMUNITY (The Anti-Loop Fix)
+        # We must find who the source event was BLOCKED from merging with, and transfer that block to the survivor.
+        immunities = session.scalars(
+            select(MergeProposalModel).where(
+                or_(
+                    MergeProposalModel.source_event_id == source_event.id,
+                    MergeProposalModel.target_event_id == source_event.id
+                ),
+                MergeProposalModel.status == JobStatus.REJECTED
+            )
+        ).all()
+
+        for old_immunity in immunities:
+            # Determine the ID of the "Other" event (the one we are blocked from)
+            blocked_event_id = (
+                old_immunity.target_event_id 
+                if old_immunity.source_event_id == source_event.id 
+                else old_immunity.source_event_id
+            )
+            
+            # Don't create immunity against ourselves (if we just merged with the blocked event, the block is moot)
+            if blocked_event_id == target_event.id:
+                continue
+
+            # Check if survivor (target) already has immunity against this event
+            exists = session.scalar(
+                select(1).where(
+                    or_(
+                        and_(
+                            MergeProposalModel.source_event_id == target_event.id,
+                            MergeProposalModel.target_event_id == blocked_event_id
+                        ),
+                        and_(
+                            MergeProposalModel.source_event_id == blocked_event_id,
+                            MergeProposalModel.target_event_id == target_event.id
+                        )
+                    ),
+                    MergeProposalModel.status == JobStatus.REJECTED
+                )
+            )
+
+            if not exists:
+                new_immunity = MergeProposalModel(
+                    id=uuid.uuid4(),
+                    proposal_type="event_merge",
+                    source_event_id=target_event.id,
+                    target_event_id=blocked_event_id,
+                    distance_score=old_immunity.distance_score,
+                    status=JobStatus.REJECTED,
+                    reasoning=f"Inherited immunity from merged event {source_event.title}"
+                )
+                session.add(new_immunity)
+                logger.info(f"🛡️ Inherited Immunity: {target_event.title} blocked from {blocked_event_id}")
+
+        # 6. Trigger Next Steps (Para o Sobrevivente)
         target_event.last_updated_at = datetime.now(timezone.utc)
         session.add(target_event)
 
@@ -206,12 +262,8 @@ class NewsCluster:
         if target_event.status == EventStatus.PUBLISHED:
             logger.info(f"🔄 Re-Queueing Published Event: {target_event.title}")
 
-      
         # Fluxo normal: vai para o Enhancer (Resumo/LLM) -> publisher
         self._trigger_event_enhancement(session, target_event.id)
-
-    # --- HELPERS DE FILA ---
-
 
     def _trigger_event_publisher(self, session: Session, event_id: uuid.UUID):
         # Novo método que faltava!

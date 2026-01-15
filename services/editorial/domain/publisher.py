@@ -387,44 +387,28 @@ class NewsPublisherDomain:
 
         logger.success(f"🚀 {event.title[:40]}... | Score: {score} | {insights}")
 
-    def publish_event_direct(self, session: Session, event: NewsEventModel):
+    def publish_event_direct(self, session: Session, event: NewsEventModel, commit: bool = True):
         """
-        Directly scores and publishes an event.
-        Designed for the Splitter to immediately put new sub-events live.
+        Directly scores and publishes an event. Supports commit=False.
         """
         if not event.is_active:
             return
 
-        # 1. Calculate Score (Uses your new Balanced Logic)
         topics = list(event.main_topic_counts.keys()) if event.main_topic_counts else []
         hot_score, insights, metadata = self.calculate_spectrum_score(event, topics)
 
-        # 2. Quality Gate (Simplified)
-        # Since this came from a Mega-Event split, we trust it has volume.
-        # We only check if the LLM failed to generate a title or impact score.
         if not event.title or event.ai_impact_score is None:
-            logger.warning(
-                f"⚠️ Direct Publish Aborted: Incomplete Metadata for {event.id}"
-            )
+            logger.warning(f"⚠️ Direct Publish Aborted: Incomplete Metadata for {event.id}")
             return
 
-        # 3. Execute Publish
-        # We don't need the 'job' wrapper here.
         event.status = EventStatus.PUBLISHED
         event.hot_score = hot_score
-
-        # Update insights in the summary JSON
-        # if event.summary and isinstance(event.summary, dict):
-        #     summary_update = dict(event.summary)
-        #     summary_update["insights"] = insights
-        #     event.summary = summary_update
-
-        # Important: Set published_at to NOW to give it a fresh start on the feed
         event.published_at = datetime.now(timezone.utc)
 
         session.add(event)
-        session.commit()
+        if commit:
+            session.commit()
+        else:
+            session.flush()
 
-        logger.success(
-            f"🚀 Direct Publish: {event.title} | Score: {hot_score} | {insights}"
-        )
+        logger.success(f"🚀 Direct Publish: {event.title} | Score: {hot_score} | {insights}")

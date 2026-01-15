@@ -185,7 +185,7 @@ class LLMRouter:
         except json.JSONDecodeError as e:
             # Fallback: Try `json_repair` if you have it installed, or raise
             # from json_repair import repair_json
-            # return repair_json(candidate)
+            return fast_json_repair.repair_json(clean, return_objects=True)
             raise e
 
     async def generate(

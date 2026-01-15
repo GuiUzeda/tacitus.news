@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 def schema_transformer(
-    self, model_type: Type[BaseModel], models: Sequence[Any]
+      models: Sequence[Any], model_type: Type[BaseModel]
 ) -> List[Any]:
     r = []
     for model in models:
@@ -14,7 +14,7 @@ def schema_transformer(
 
 
 async def aschema_transformer(
-    self, model_type: Type[BaseModel], models: Sequence[Any]
+     models: Sequence[Any],  model_type: Type[BaseModel]
 ) -> List[Any]:
     r = []
     for model in models:
