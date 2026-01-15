@@ -31,7 +31,8 @@ from news_events_lib.models import (
     ArticleModel, 
     NewsEventModel, 
     MergeProposalModel, 
-    EventStatus
+    EventStatus,
+    ArticleContentModel
 )
 from scripts.check_blocks import check_blocks  # 👈 Import the script
 
@@ -252,6 +253,11 @@ class EditorialCLI:
         if articles:
             console.print(f"Unlinking {len(articles)} articles...")
             
+            # Explicitly delete contents to ensure re-scrape
+            article_ids = [a.id for a in articles]
+            if article_ids:
+                session.execute(delete(ArticleContentModel).where(ArticleContentModel.article_id.in_(article_ids)))
+
             queue_data = []
             now = datetime.now(timezone.utc)
             
@@ -273,7 +279,6 @@ class EditorialCLI:
                 art.interests = {}
                 art.embedding = None
                 art.summary_status = JobStatus.PENDING
-                art.contents = [] # Clear content to force re-scrape
 
                 queue_data.append({
                     "article_id": art.id,
