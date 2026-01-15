@@ -220,6 +220,9 @@ class NewsCluster:
                 else old_immunity.source_event_id
             )
             
+            if blocked_event_id is None:
+                continue
+
             # Don't create immunity against ourselves (if we just merged with the blocked event, the block is moot)
             if blocked_event_id == target_event.id:
                 continue
@@ -236,8 +239,7 @@ class NewsCluster:
                             MergeProposalModel.source_event_id == blocked_event_id,
                             MergeProposalModel.target_event_id == target_event.id
                         )
-                    ),
-                    MergeProposalModel.status == JobStatus.REJECTED
+                    )
                 )
             )
 

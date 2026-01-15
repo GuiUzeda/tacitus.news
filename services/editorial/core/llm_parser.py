@@ -427,8 +427,9 @@ class CloudNewsFilter:
         - **Gossip + Politics:** Scandals involving ministers, public figures committing crimes.
         
         **EXCLUDE (True Noise Only):**
+        - **REALITY SHOWS:** Big Brother Brasil (BBB), A Fazenda, The Voice, etc. (UNLESS a politician is involved).
         - **PURE** Sports Match Results (e.g., "Flamengo 2 x 1 Vasco", "Neymar injured", "Team Lineup").
-        - **PURE** Celebrity Gossip (e.g., "Actor dating Actress", "Outfit of the day", "Reality Show elimination").
+        - **PURE** Celebrity Gossip (e.g., "Actor dating Actress", "Outfit of the day", "Divorces").
         - Horoscopes, Recipes, Lifestyle tips.
         - Product Reviews (phones, cars) & Lottery results.
         
@@ -815,7 +816,7 @@ class CloudNewsAnalyzer:
         You are a Senior Journalistic Editor in Brazil.
 
         **OBJECTIVE:**
-        Synthesize the facts of a news event into a neutral, journalistic summary, categorize it, and assess its societal impact.
+        Synthesize the facts into a neutral summary, categorize the event, and RUTHLESSLY assess its societal impact.
 
         **INPUT DATA:**
         [NEW ARTICLES]:
@@ -824,35 +825,47 @@ class CloudNewsAnalyzer:
         [EXISTING DATA]:
         {prev_summary_str[:5000]}
 
+        **IMPACT SCORING RUBRIC (0-100) - BE STRICT:**
+        You must distinguish between "Local Noise/Entertainment" and "National/Global Signals".
+        
+        * **SCOPE: IRRELEVANT (Score 0-15)**
+            * **Reality Shows:** BBB (Big Brother Brasil), A Fazenda, RuPaul, etc.
+            * **Celebrity Gossip:** Dating, breakups, outfits, minor health issues of famous people.
+            * **Viral Nonsense:** Internet memes without political context.
+            * **Routine Sports:** Match results, player transfers (unless massive corruption).
+            * **Curiosities and life hacks/tips:** "How to save money", "Best travel destinations", "Healthy recipes", nice to now news but not relevant.
+            
+        * **SCOPE: LOCAL (Score 16-40)**
+            * **Municipal/Hyper-Local:** "Bus line changes", "Street paved", "Store opening".
+            * "Local crime with no political link".
+            * "Weather forecast for the weekend".
+            
+        * **SCOPE: STATE/ROUTINE (Score 41-65)**
+            * **41-55 (Routine):** Standard daily politics (statements, meetings), Monthly economic stats (if stable).
+            * **56-65 (State Level):** State governor actions, large infrastructure works, major police operations involving gangs.
+
+        * **SCOPE: NATIONAL/CRITICAL (Score 66-100)**
+            * **66-79 (Significant):** New Federal Laws passed, Major Corruption Scandals (Lava Jato level), Large fluctuation in Dollar/Stock Market.
+            * **80-89 (High Impact):** Arrest of high officials (Ministers, Ex-Presidents), Constitutional Crisis, Natural Disasters with mass casualties.
+            * **90-100 (Historic):** Coup d'état, War Declaration, Pandemic, Assassination of Head of State.
+
         **TASK INSTRUCTIONS:**
         1. **Synthesis:** Merge new facts with existing data. Prioritize recent updates.
         2. **Bias Detection:** Look for omissions. What facts are specific sides ignoring?
         3. **Language:** Output strictly in **PORTUGUESE (PT-BR)**.
         4. **Handling Missing Sides:** If a side (Left/Right) has no sources, set it to empty string `""`.
 
-        **CATEGORIES:**
-        Choose ONE: [POLITICS, ECONOMY, WORLD, TECH, SCIENCE, HEALTH, ENTERTAINMENT, SPORTS, CRIME, OTHER]
-
         **CRITICAL - TITLE RULES:**
         - The `title` must describe the **EVENT**, not your analysis.
         - **FORBIDDEN WORDS in Title:** "Análise", "Cobertura", "Visão", "Relatório".
         - **DO NOT PUT THE NEWSPAPER NAME IN THE TITLE.**
-        
-        **IMPACT SCORING RUBRIC (0-100) - IMPORTANT!:**
-        Assess the event's importance based on **Consequences** and **Scale**, NOT just popularity.
-        - **0 (Completely irrelevant):** Celebrity gossip, viral social media trends, sports results, bbb, reality shows, etc.
-        - **1-15 (Noise):** entertainment releases, food receipes, horoscopes, weather forecasts, tips, etc.
-        - **16-40 (Local):** Minor local news, minor crime with no wider implication.
-        - **41-60 (Routine):** Standard political statements, economic updates.
-        - **61-80 (Significant):** Major legislation passed, national elections, natural disasters, corporate bankruptcies.
-        - **81-100 (Historic/Critical):** Wars, Constitutional crises, Pandemics, Assassinations of heads of state.
-        
+
         **OUTPUT JSON SCHEMA:**
         {{
             "title": "Direct, active-voice headline.",
             "subtitle": "Contextual explanation.",
-            "category": "One of the categories above.",
-            "impact_reasoning": "Explain WHY you chose this score based on the rubric.",
+            "category": "One of: POLITICS, ECONOMY, WORLD, TECH, SCIENCE, HEALTH, ENTERTAINMENT, SPORTS, CRIME, OTHER",
+            "impact_reasoning": "State the SCOPE (Local/National) and WHY you chose this score.",
             "impact_score": 50,
             "summary": {{
                 "left": "Markdown bullet points... OR \"\"",

@@ -20,24 +20,16 @@ class NewsPublisherDomain:
         self.cluster = NewsCluster()
 
         # --- CONFIGURATION (EQUILIBRADA) ---
-
-        # FIX 1: PESOS LOGARÍTMICOS
-        # Achata a curva. Editorial Score 300 vira ~230 pontos, não 600.
-        # Permite que eventos novos compitam sem precisarmos de bônus absurdos.
         self.WEIGHT_EDITORIAL_LOG_FACTOR = 40.0
         self.WEIGHT_VOLUME_LOG_FACTOR = 10.0
 
-        # FIX 2: RECÊNCIA MODERADA
-        # Bônus máximo de 180 (suficiente para destaque, mas não para vencer eventos gigantes sozinhos)
-        # Meia-vida de 24h: A notícia permanece "fresca" por um dia inteiro, caindo suavemente.
         self.RECENCY_MAX_BONUS = 180.0
         self.RECENCY_HALFLIFE_HOURS = 24.0
 
         # Collision Thresholds
-        self.COLLISION_THRESHOLD_STRICT = 0.05  # 95% Similar -> Auto Merge
-        self.COLLISION_THRESHOLD_LOOSE = 0.15  # 85% Similar -> Proposal
+        self.COLLISION_THRESHOLD_STRICT = 0.05
+        self.COLLISION_THRESHOLD_LOOSE = 0.15
 
-        # Baseline de Feed (Ajuste conforme seu feeds.json)
         self.BASELINE_BIAS = {"left": 0.3, "center": 0.4, "right": 0.3}
 
         self.TOPIC_MULTIPLIERS = {
@@ -66,14 +58,14 @@ class NewsPublisherDomain:
             logger.warning(f"👻 Publisher ignored dead event: {job.event_id}")
             job.status = JobStatus.COMPLETED
             return False
-
+        if event.firs_article_date > datetime.now(timezone.utc) :
+            job.status = JobStatus.WAITING
+            job.msg = "Future event"
+            return False
         # --- 1. SMART COLLISION CHECK ---
-        # Checks vectors, time, AND history (rejected proposals)
         collision = self._check_collision_smart(session, event)
 
         if collision:
-
-            # NEW: Handle the "Pending" block we added
             if collision.get("status") == "WAITING":
                 job.status = JobStatus.WAITING
                 job.msg = "Paused: Pending Merge Proposal"
@@ -84,40 +76,30 @@ class NewsPublisherDomain:
             is_auto = collision["auto_merge"]
             existing_event = session.get(NewsEventModel, existing_id)
 
-            # A. AUTO-MERGE (Strict Match)
             if is_auto and existing_event:
                 logger.warning(
                     f"⚡ PUBLISHER AUTO-MERGE: '{event.title}' -> '{existing_event.title}' (Dist: {distance:.3f})"
                 )
-
-                # Use the robust merge logic from Clustering Domain
-                # This moves articles, updates counts, and handles the "dead" event
                 self.cluster.execute_event_merge(session, event, existing_event)
-
-                # Trigger Enhancer on the SURVIVOR (Published Event) to update summary
                 self.cluster._trigger_event_enhancement(session, existing_event.id)
 
                 job.status = JobStatus.COMPLETED
                 job.msg = f"Auto-Merged into {existing_event.title}"
                 return False
 
-            # B. PROPOSAL (Soft Match)
-            # Only create proposal if NOT auto-merged
             logger.info(
                 f"💡 PUBLISHER PROPOSAL: '{event.title}' ?= '{collision['title']}' (Dist: {distance:.3f})"
             )
 
             proposal = MergeProposalModel(
                 proposal_type="event_merge",
-                source_event_id=event.id,  # Unpublished (Source)
-                target_event_id=existing_id,  # Published (Target)
+                source_event_id=event.id,
+                target_event_id=existing_id,
                 distance_score=distance,
                 reasoning=f"Publisher Gatekeeper (Dist: {distance:.3f})",
-                status=JobStatus.PENDING,  # Sent to Reviewer
+                status=JobStatus.PENDING,
             )
             session.add(proposal)
-
-            # Stop the pipeline. The Reviewer must decide.
             job.status = JobStatus.COMPLETED
             job.msg = f"Blocked by Proposal -> {existing_id}"
             return False
@@ -127,15 +109,15 @@ class NewsPublisherDomain:
             list(event.main_topic_counts.keys()) if event.main_topic_counts else []
         )
 
-        # Calculate Score
         hot_score, insights, metadata = self.calculate_spectrum_score(
             event, event_topics
         )
 
-        # Quality Gates
         is_breaking = "BREAKING" in insights
         is_blind_spot = "BLIND_SPOT" in insights
         is_high_impact = "HIGH_IMPACT" in insights
+        is_low_impact = "LOW_IMPACT" in insights
+
         is_soft_news = any(
             t in event_topics
             for t in ["Lifestyle", "Entertainment", "Nature", "Sports"]
@@ -165,9 +147,6 @@ class NewsPublisherDomain:
         if candidate_event.embedding_centroid is None:
             return None
 
-        # --- STEP 1: PENDING CHECK (Prevent publishing if under review) ---
-        # If this event is already waiting for a merge decision, DO NOT publish it.
-        # We check if this event is the SOURCE of a pending proposal.
         pending_proposal = session.execute(
             select(MergeProposalModel.id)
             .where(
@@ -178,27 +157,18 @@ class NewsPublisherDomain:
 
         if pending_proposal:
             logger.info(f"⏸️ Event {candidate_event.id} is pending merge review. Pausing publish.")
-            # We return a special flag or handle this in the caller. 
-            # For now, returning None would publish it (BAD). 
-            # We must signal a "Soft Block".
-            # Hack: Return a 'fake' collision that forces a waiting state, or simply:
             return {
                 "id": None, 
                 "title": "Pending Proposal", 
                 "score": 0.0, 
                 "auto_merge": False, 
-                "status": "WAITING" # Custom signal
+                "status": "WAITING"
             }
-
-        # --- STEP 2: VECTOR SEARCH ---
         
-        # Define the math expression for reuse
         distance_expr = NewsEventModel.embedding_centroid.cosine_distance(
             candidate_event.embedding_centroid
         )
 
-        # Exclude pairs that have ANY history (Rejected, Pending, etc)
-        # If we previously rejected A->B, we don't want to check A->B again.
         has_proposal = exists(
             select(1).where(
                 or_(
@@ -224,13 +194,8 @@ class NewsPublisherDomain:
             )
             .where(NewsEventModel.status == EventStatus.PUBLISHED)
             .where(NewsEventModel.is_active == True)
-            
-            # ✅ FIX: Filter by the WIDEST threshold (Loose), not the Strict one.
             .where(distance_expr <= self.COLLISION_THRESHOLD_LOOSE) 
-            
-            # ✅ FIX: Ensure we don't check pairs that already have proposals
             .where(~has_proposal) 
-            
             .order_by(distance_expr)
             .limit(1)
         )
@@ -241,7 +206,6 @@ class NewsPublisherDomain:
 
         existing_id, existing_title, existing_first_date, existing_created, distance = result
         
-        # --- STEP 3: TIME CHECK ---
         existing_ref = existing_first_date or existing_created
         if existing_ref.tzinfo is None: existing_ref = existing_ref.replace(tzinfo=timezone.utc)
         
@@ -250,7 +214,6 @@ class NewsPublisherDomain:
 
         time_diff_hours = abs((candidate_ref - existing_ref).total_seconds() / 3600.0)
 
-        # A. AUTO-MERGE CONDITIONS (Strict + Recent)
         if distance <= self.COLLISION_THRESHOLD_STRICT and time_diff_hours <= 72:
             return {
                 "id": existing_id, 
@@ -259,7 +222,6 @@ class NewsPublisherDomain:
                 "auto_merge": True
             }
 
-        # B. PROPOSAL CONDITIONS (Loose + Very Recent)
         if distance <= self.COLLISION_THRESHOLD_LOOSE and time_diff_hours <= 24:
              return {
                 "id": existing_id, 
@@ -269,6 +231,7 @@ class NewsPublisherDomain:
             }
 
         return None
+
     def calculate_spectrum_score(
         self, event: NewsEventModel, topics: List[str]
     ) -> Tuple[float, List[str], Dict]:
@@ -276,7 +239,6 @@ class NewsPublisherDomain:
         insights = []
 
         # --- A. BASE METRICS (LOGARITHMIC) ---
-        # Importante: Substituímos a multiplicação linear por Logaritmo
         if event.editorial_score > 0:
             score += (
                 math.log1p(event.editorial_score) * self.WEIGHT_EDITORIAL_LOG_FACTOR
@@ -284,28 +246,22 @@ class NewsPublisherDomain:
 
         score += math.log1p(event.article_count) * self.WEIGHT_VOLUME_LOG_FACTOR
 
-        # --- B. RECENCY CURVE (Suavizada) ---
+        # --- B. RECENCY CURVE (SANITIZED) ---
         ref_date = event.first_article_date or event.created_at
         if ref_date.tzinfo is None:
             ref_date = ref_date.replace(tzinfo=timezone.utc)
+        
+        # FIX 1: Prevent negative age (Future dates) exploding the score
         age_hours = (datetime.now(timezone.utc) - ref_date).total_seconds() / 3600.0
+        age_hours = max(0.0, age_hours) 
 
-        # Decay:
-        # 0h  = +180 pts
-        # 12h = +127 pts
-        # 24h = +90 pts
-        # 48h = +45 pts
+        # Decay logic
         if age_hours < 72:
             recency_score = self.RECENCY_MAX_BONUS * (
                 0.5 ** (age_hours / self.RECENCY_HALFLIFE_HOURS)
             )
             score += recency_score
-
-            # Tag Breaking apenas para as primeiras ~12-15 horas
-            if recency_score > 120:
-                insights.append("BREAKING")
         else:
-            # Penalidade leve para arquivo
             score -= age_hours * 0.1
 
         # --- C. SEMANTIC & IMPACT ---
@@ -316,9 +272,28 @@ class NewsPublisherDomain:
                 mult = self.TOPIC_MULTIPLIERS.get(norm_topic, 1.0)
                 best_multiplier *= mult
             score *= best_multiplier
+        
+        impact = event.ai_impact_score or 10
+        
+        # FIX 2: Steeper Impact Curve
+        # Old: 0.4 + (impact/100 * 1.6) -> Range [0.4 ... 2.0]
+        # New: 
+        #   Impact 20 -> 0.4 (Punishment)
+        #   Impact 50 -> 1.0 (Neutral)
+        #   Impact 90 -> 2.5 (High Boost)
+        #   Impact 100 -> 3.0
+        if impact < 30:
+            # Range 0.01 to 0.1
+            semantic_multiplier = 0.01 + (impact / 30.0) * 0.09 # Max 0.1
 
-        impact = event.ai_impact_score or 50
-        semantic_multiplier = 0.4 + (impact / 100 * 1.6)
+        elif impact < 50:
+            # Range 0.1 to .8
+            semantic_multiplier = 0.1 + ((impact - 30.0) / 20.0) * 0.7 # Max 0.8
+        else:
+            # Range .8 to 3.0
+            semantic_multiplier = 0.8 + ((impact - 50.0) / 50.0) * 2.2 # Max 3.0
+            
+
         score *= semantic_multiplier
 
         # Clickbait Penalty
@@ -329,11 +304,22 @@ class NewsPublisherDomain:
                 if avg_clickbait > self.CLICKBAIT_PENALTY_THRESHOLD:
                     score *= 0.7
                     insights.append("CLICKBAIT_RISK")
-
-        if impact >= 85:
+        
+        # Insights Generation
+        if impact >= 80:
             insights.append("HIGH_IMPACT")
         elif impact <= 30:
             insights.append("LOW_IMPACT")
+
+        # FIX 3: Stricter "BREAKING"
+        # Must be very fresh (< 6h) AND have moderate relevance (> 60)
+        # Or be extremely fresh (< 2h)
+        if age_hours < 6.0 and impact >= 60:
+             insights.append("BREAKING")
+        elif age_hours < 2.0:
+             # Freshness override for very new stuff, even if low impact
+             insights.append("BREAKING")
+
 
         # --- D. SPECTRUM BONUS ---
         bias_counts = event.article_counts_by_bias or {}
@@ -388,18 +374,17 @@ class NewsPublisherDomain:
         logger.success(f"🚀 {event.title[:40]}... | Score: {score} | {insights}")
 
     def publish_event_direct(self, session: Session, event: NewsEventModel, commit: bool = True):
-        """
-        Directly scores and publishes an event. Supports commit=False.
-        """
         if not event.is_active:
             return
-
+        if not event.title :
+            logger.warning(
+                f"⚠️ Direct Publish Aborted: Incomplete Metadata for {event.id}"
+            )
+            return
         topics = list(event.main_topic_counts.keys()) if event.main_topic_counts else []
         hot_score, insights, metadata = self.calculate_spectrum_score(event, topics)
 
-        if not event.title or event.ai_impact_score is None:
-            logger.warning(f"⚠️ Direct Publish Aborted: Incomplete Metadata for {event.id}")
-            return
+
 
         event.status = EventStatus.PUBLISHED
         event.hot_score = hot_score
@@ -411,4 +396,6 @@ class NewsPublisherDomain:
         else:
             session.flush()
 
-        logger.success(f"🚀 Direct Publish: {event.title} | Score: {hot_score} | {insights}")
+        logger.success(
+            f"🚀 Direct Publish: {event.title} | Score: {hot_score} | {insights}"
+        )

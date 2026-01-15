@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, select, func, update, delete, desc
 from sqlalchemy.orm import sessionmaker, joinedload
+from sqlalchemy.dialects.postgresql import insert
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -19,6 +20,7 @@ from config import Settings
 from core.nlp_service import NLPService
 from core.models import (
     ArticlesQueueModel,
+    ArticlesQueueName,
     EventsQueueModel, 
     JobStatus,
     EventsQueueName,
@@ -43,6 +45,19 @@ class EditorialCLI:
         self.cluster_service = NewsCluster()
         self.nlp_service = NLPService()
         self.publisher_domain = NewsPublisherDomain() # For 'Recalc' and 'Why'
+
+    def render_summary(self, summary) -> str:
+        """Helper to safely render summary text from dict or string."""
+        if not summary:
+            return ""
+
+        if isinstance(summary, dict):
+            val = summary.get("center") or summary.get("bias")
+            if isinstance(val, list):
+                return "\n".join(str(x) for x in val)
+            return str(val) if val else ""
+
+        return str(summary)
 
     def start(self):
         while True:
@@ -182,6 +197,7 @@ class EditorialCLI:
                 console.print("\n[bold green]b[/bold green] : Boost (+10)    [bold red]d[/bold red] : Demote (-10)")
                 console.print("[bold red]k[/bold red] : KILL (Archive)  [bold cyan]e[/bold cyan] : Edit Title")
                 console.print("i : Inspect Content")
+                console.print("[bold red]x[/bold red] : Dissolve (Reset Articles)")
                 console.print("q : Back")
                 
                 action = Prompt.ask("Action").lower()
@@ -213,6 +229,11 @@ class EditorialCLI:
                 elif action == "i":
                     self._inspect_event_deep_dive(event.id)
 
+                elif action == "x":
+                    if Confirm.ask("⚠️ DISSOLVE Event? This will unlink articles and re-queue them for Enrichment."):
+                        self._dissolve_event(session, event)
+                        return
+
     def _recalc_single_event(self, session, event):
         """Helper to recalc score and save immediately"""
         topics = list(event.main_topic_counts.keys()) if event.main_topic_counts else []
@@ -224,6 +245,70 @@ class EditorialCLI:
             s['insights'] = insights
             event.summary = s
         session.commit()
+
+    def _dissolve_event(self, session, event):
+        # 1. Unlink Articles & Re-queue
+        articles = event.articles
+        if articles:
+            console.print(f"Unlinking {len(articles)} articles...")
+            
+            queue_data = []
+            now = datetime.now(timezone.utc)
+            
+            for art in articles:
+                art.event_id = None # Unlink
+                
+                # Strip Article Info (Reset for Re-Enrichment)
+                art.title = "Unknown"
+                art.subtitle = None
+                art.summary = None
+                art.published_date = None
+                art.stance = None
+                art.stance_reasoning = None
+                art.clickbait_score = None
+                art.clickbait_reasoning = None
+                art.main_topics = None
+                art.key_points = None
+                art.entities = []
+                art.interests = {}
+                art.embedding = None
+                art.summary_status = JobStatus.PENDING
+                art.contents = [] # Clear content to force re-scrape
+
+                queue_data.append({
+                    "article_id": art.id,
+                    "status": JobStatus.PENDING,
+                    "queue_name": ArticlesQueueName.ENRICH,
+                    "created_at": now,
+                    "updated_at": now,
+                    "attempts": 0,
+                    "msg": f"Dissolved from Event {event.id}"
+                })
+            
+            session.add_all(articles)
+            
+            if queue_data:
+                stmt = insert(ArticlesQueueModel).values(queue_data)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['article_id'],
+                    set_={
+                        "status": JobStatus.PENDING,
+                        "queue_name": ArticlesQueueName.ENRICH,
+                        "updated_at": now,
+                        "msg": stmt.excluded.msg
+                    }
+                )
+                session.execute(stmt)
+
+        # 2. Cleanup Dependencies
+        session.execute(delete(MergeProposalModel).where((MergeProposalModel.source_event_id == event.id) | (MergeProposalModel.target_event_id == event.id)))
+        session.execute(delete(EventsQueueModel).where(EventsQueueModel.event_id == event.id))
+        
+        # 3. Delete Event
+        session.delete(event)
+        session.commit()
+        console.print("[green]Event Dissolved![/green]")
+        time.sleep(1)
 
     # =========================================================================
     # 2. REVIEW STATION
@@ -520,11 +605,7 @@ class EditorialCLI:
                 console.print(f"ID: {event.id} | Articles: {len(event.articles)}")
 
                 if event.summary:
-                    sum_text = str(event.summary)
-                    if isinstance(event.summary, dict):
-                        sum_text = event.summary.get("center", "") or event.summary.get(
-                            "bias", ""
-                        )
+                    sum_text = self.render_summary(event.summary)
                     console.print(
                         Panel(sum_text, title="Summary", border_style="green")
                     )
@@ -574,7 +655,7 @@ class EditorialCLI:
                 content_text = fresh_article.contents[0].content
             
             if fresh_article and fresh_article.summary:
-                console.print(Panel(fresh_article.summary, title="Summary"))
+                console.print(Panel(self.render_summary(fresh_article.summary), title="Summary"))
             
             console.print(Markdown(content_text))
             
