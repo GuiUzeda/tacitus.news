@@ -733,7 +733,10 @@ class NewsCluster:
                     clusters[label] = []
                 clusters[label].append(art)
 
-        # 6. Handle Noise (Assign to nearest cluster)
+        # 6. Handle Noise (The "Smart Orphan" Logic)
+        # Threshold: 0.25 (Same as your Loose Collision/Proposal threshold)
+        NOISE_MERGE_THRESHOLD = 0.25 
+        
         if clusters and noise:
             for noise_idx in noise:
                 min_dist = 999.0
@@ -741,7 +744,8 @@ class NewsCluster:
                 
                 # Compare noise item against valid cluster members
                 for label, cluster_arts in clusters.items():
-                    # Pick the first article of the cluster as a representative
+                    # Heuristic: Compare against the first member (Representative)
+                    # Ideally, compare against all and take average, but this is fast.
                     member_idx = valid_articles.index(cluster_arts[0]) 
                     d = dist_final[noise_idx][member_idx]
                     
@@ -749,14 +753,23 @@ class NewsCluster:
                         min_dist = d
                         best_cluster = label
                 
-                if best_cluster is not None:
+                # --- LOGIC CHANGE HERE ---
+                if best_cluster is not None and min_dist <= NOISE_MERGE_THRESHOLD:
+                    # It's close enough, just an outlier. Pull it in.
                     clusters[best_cluster].append(valid_articles[noise_idx])
+                else:
+                    # It is TOO FAR. Orphan it.
+                    # We create a new unique label for this orphan
+                    new_orphan_label = 1000 + noise_idx
+                    clusters[new_orphan_label] = [valid_articles[noise_idx]]
+                    logger.info(f"✂️ Orphaned noise article: '{valid_articles[noise_idx].title[:20]}' (Dist {min_dist:.2f} > {NOISE_MERGE_THRESHOLD})")
 
         # 7. Format Output
         result_groups = list(clusters.values())
         
-        if len(result_groups) < 2:
-            return []
+        # Note: We allow groups of size 1 (orphans) to be returned now.
+        if not result_groups:
+             return []
 
         # Sort groups by time (Oldest event first)
         result_groups.sort(key=lambda arts: min(a.published_date for a in arts))

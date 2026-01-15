@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 from os import wait
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, AsyncGenerator
 
 import aiohttp
@@ -244,11 +244,22 @@ class HarvestingDomain:
             session.execute(stmt)
 
     def _parse_date(self, pub_data):
+        now = datetime.now(timezone.utc)
         if not pub_data:
-            return datetime.now(timezone.utc)
+            return now
         try:
+            dt = None
             if isinstance(pub_data, str):
-                return datetime.fromisoformat(pub_data.replace("Z", "+00:00"))
-            return pub_data
+                dt = datetime.fromisoformat(pub_data.replace("Z", "+00:00"))
+            else:
+                dt = pub_data
+            
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            # Future Guard: If date is > 1 hour in future, clamp to now
+            if dt > (now + timedelta(hours=1)):
+                return now
+            return dt
         except:
-            return datetime.now(timezone.utc)
+            return now

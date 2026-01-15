@@ -243,9 +243,9 @@ class EnrichingDomain:
                 if pdate.tzinfo is None:
                     pdate = pdate.replace(tzinfo=timezone.utc)
                 
-                if pdate < datetime.now(timezone.utc) - timedelta(days=4):
+                if pdate < datetime.now(timezone.utc) - timedelta(days=2):
                     job.status = JobStatus.COMPLETED
-                    job.msg = "Skipped: Too old (> 7 days)"
+                    job.msg = "Skipped: Too old (> 2 days)"
                     return job, None, False
 
             try:
@@ -352,7 +352,12 @@ class EnrichingDomain:
                 job.status = JobStatus.FAILED
                 job.msg = f"LLM Blocked: {llm_out.error_message}"
                 return
-
+            # Handle Content Irrelevance (The new logic)
+            if llm_out.status == "irrelevant":
+                job.status = JobStatus.COMPLETED # Or REJECTED
+                job.msg = f"Content Irrelevant: {llm_out.error_message}"
+                # Do NOT queue for clustering
+                return
             article.summary = llm_out.summary
             article.stance = llm_out.stance
             article.stance_reasoning = llm_out.stance_reasoning
@@ -427,8 +432,23 @@ class EnrichingDomain:
     
     def _parse_date(self, date_val: str | datetime) -> Optional[datetime]:
         if not date_val: return None
-        if isinstance(date_val, datetime): return date_val
-        try:
-            return datetime.fromisoformat(str(date_val).replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            return None
+        
+        dt = None
+        if isinstance(date_val, datetime): 
+            dt = date_val
+        else:
+            try:
+                dt = datetime.fromisoformat(str(date_val).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return None
+        
+        if dt:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            # Future Guard: If date is > 1 hour in future, clamp to now
+            now = datetime.now(timezone.utc)
+            if dt > (now + timedelta(hours=1)):
+                return now
+            return dt
+        return None

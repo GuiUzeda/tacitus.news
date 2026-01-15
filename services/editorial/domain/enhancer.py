@@ -126,28 +126,30 @@ class NewsEnhancerDomain:
         session.add(event)
         session.flush()
 
-        if summary_inputs and not should_skip_synthesis:
-            logger.info(f"Summarizing {event.title} with {len(summary_inputs)} new inputs.")
-            
-            # Pass the previous summary to maintain context!
-            event_summary = await self.enhancer.summarize_event(summary_inputs, event.summary)
-            
-            if event_summary:
-                event.title = event_summary.title or event.title
-                event.subtitle = event_summary.subtitle
-                event.summary = event_summary.summary
-                event.last_summarized_at = datetime.now(timezone.utc)
-                event.ai_impact_score = event_summary.impact_score
-                event.ai_impact_reasoning = event_summary.impact_reasoning
-                event.category_tag = event_summary.category
+        if summary_inputs:
+            if not should_skip_synthesis:
+                logger.info(f"Summarizing {event.title} with {len(summary_inputs)} new inputs.")
                 
-                # ✅ STATE TRANSITION: COMPLETED -> APPROVED
-                # This effectively "signs off" that these articles are in the summary.
-                for article in articles_to_mark_integrated:
-                    article.summary_status = JobStatus.APPROVED
-                    session.add(article)
+                # Pass the previous summary to maintain context!
+                event_summary = await self.enhancer.summarize_event(summary_inputs, event.summary)
                 
-                session.add(event)
+                if event_summary:
+                    event.title = event_summary.title or event.title
+                    event.subtitle = event_summary.subtitle
+                    event.summary = event_summary.summary
+                    event.last_summarized_at = datetime.now(timezone.utc)
+                    event.ai_impact_score = event_summary.impact_score
+                    event.ai_impact_reasoning = event_summary.impact_reasoning
+                    event.category_tag = event_summary.category
+                    session.add(event)
+            else:
+                logger.info(f"⏳ Debounced: Skipping LLM for {event.title} (Wait for next cycle)")
+
+            # FIX: ALWAYS mark articles as integrated if we aggregated their stats
+            # Otherwise we will double-count them next time.
+            for article in articles_to_mark_integrated:
+                article.summary_status = JobStatus.APPROVED
+                session.add(article)
 
         # --- PHASE 4: Transition ---
         session.refresh(job)
