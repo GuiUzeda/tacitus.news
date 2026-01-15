@@ -63,18 +63,16 @@ class HarvesterWorker:
                     await asyncio.gather(*tasks)
 
                 logger.success(f"[{self.worker_id}] Cycle Finished.")
-                # current_hour = datetime.now().hour
-                # if current_hour % 8 == 0:
-                #      logger.info(f"[{self.worker_id}] 🕒 Scheduled Maintenance: Triggering Event Splitter...")
-                #      # Use a fresh session for the splitter
-                #      with self.SessionLocal() as session:
-                #          try:
-                #              # We use wait_for to prevent the splitter from hanging the harvester indefinitely
-                #              await asyncio.wait_for(self.splitter.run_cycle(session), timeout=600)
-                #          except asyncio.TimeoutError:
-                #              logger.error("Splitter timed out!")
-                #          except Exception as e:
-                #              logger.error(f"Splitter failed: {e}")
+                logger.info(f"[{self.worker_id}] 🕒 Scheduled Maintenance: Triggering Event Splitter...")
+                # Use a fresh session for the splitter
+                with self.SessionLocal() as session:
+                    try:
+                        # We use wait_for to prevent the splitter from hanging the harvester indefinitely
+                        await asyncio.wait_for(self.splitter.run_cycle(session), timeout=600)
+                    except asyncio.TimeoutError:
+                        logger.error("Splitter timed out!")
+                    except Exception as e:
+                        logger.error(f"Splitter failed: {e}")
                 
                 # Sleep to align with hourly schedule (1 hour after START)
                 elapsed = (datetime.now() - cycle_start_time).total_seconds()

@@ -1,29 +1,43 @@
-import { Masthead } from "@/components/layouts/masthead";
-import { FeedLayout } from "@/features/feed/components/feed-layout";
+import { Masthead } from "@/components/layouts/masthead"; // Ensure this exists
+import { HeroEvent } from "@/features/feed/components/hero-event";
+import { WireTable } from "@/features/feed/components/wire-table";
+import { KeyDevelopments } from "@/features/feed/components/key-developments";
+import { BlindspotCard } from "@/features/feed/components/blindspot-card";
 import { getFeedEvents } from "@/features/feed/api";
 
-// 1. This is a Server Component by default
 export default async function HomePage() {
-  // 2. Fetch Data (Runs on Server)
   const events = await getFeedEvents();
 
-  // 3. Transform Data
+  // Robust slicing even if few events exist
   const heroEvent = events[0];
   const keyDevelopments = events.slice(1, 6);
   const wireEvents = events.slice(6);
   const blindspotEvent = events.find((e) => e.isBlindspot);
 
-  // 4. Render
   return (
-    <div className="min-h-screen bg-white text-zinc-950 selection:bg-zinc-900 selection:text-white">
+    <div className="min-h-screen bg-white text-zinc-950">
       <Masthead />
       <main className="container mx-auto max-w-screen-xl px-4 py-8 md:px-8">
-        <FeedLayout
-          hero={heroEvent}
-          wire={wireEvents}
-          keyDevs={keyDevelopments}
-          blindspot={blindspotEvent}
-        />
+        
+        {heroEvent && <HeroEvent event={heroEvent} />}
+        
+        {blindspotEvent && (
+           <div className="my-12">
+             <BlindspotCard event={blindspotEvent} />
+           </div>
+        )}
+
+        {keyDevelopments.length > 0 && (
+          <div className="mt-12">
+            <KeyDevelopments events={keyDevelopments} />
+          </div>
+        )}
+
+        {wireEvents.length > 0 && (
+          <div className="mt-12">
+             <WireTable events={wireEvents} />
+          </div>
+        )}
       </main>
     </div>
   );
