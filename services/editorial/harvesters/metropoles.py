@@ -10,7 +10,7 @@ class MetropolesHarvester(BaseHarvester):
     ):
         super().__init__(cutoff)
 
-    async def fetch_feed_articles(self, session, source) -> list[dict]:
+    async def fetch_feed_articles(self, session, source, ignore_hashes: set = set()) -> list[dict]:
         url = source["url"]
         if url == "https://www.metropoles.com/sitemap/noticias-{{today}}.xml":
             today = datetime.now().strftime("%Y-%m-%d")
@@ -19,5 +19,5 @@ class MetropolesHarvester(BaseHarvester):
             )
             
             source["url"] = today_url
-            return await super().fetch_feed_articles(session, source)
-        return await super().fetch_feed_articles(session, source)
+            return await super().fetch_feed_articles(session, source, ignore_hashes)
+        return await super().fetch_feed_articles(session, source, ignore_hashes)

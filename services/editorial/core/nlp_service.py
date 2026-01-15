@@ -101,7 +101,7 @@ class NLPService:
         clean_txt = self.clean_text_for_embedding(text)
         
         # 2. Truncate (Nomic allows 8192, but for clustering, the lead is key)
-        truncated_txt = clean_txt[:3000]
+        truncated_txt = clean_txt[:20000]
 
         prefix = "search_document: "
         try:

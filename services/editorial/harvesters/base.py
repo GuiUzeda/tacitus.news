@@ -1,38 +1,35 @@
 import asyncio
+import hashlib
 import re
+import random
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from urllib.parse import urlparse, urljoin
+from email.utils import parsedate_to_datetime
 
 import aiohttp
 from bs4 import BeautifulSoup
 from loguru import logger
-from playwright.async_api import async_playwright
+
+from core.browser import BrowserFetcher
 
 
 class BaseHarvester:
     def __init__(
         self,
-        cutoff: timedelta = timedelta(hours=24),
+        cutoff: timedelta = timedelta(hours=100),
     ):
         # Universal Garbage Filter (Applied to all links by default)
         self.blocklist: str = (
             r"(login|search|tag|gallery|/esporte/|futebol|bbb|horoscopo|gastronomia|"
-            r"patrocinado|publicidade|quiz|ilustrada|podcast|web-stories|/live/)"
+            r"patrocinado|publicidade|quiz|ilustrada|podcast|web-stories|/live/|"
+            r"\.(jpg|jpeg|png|gif|bmp|webp|svg|mp4|avi|mov|wmv|flv|mp3|wav|pdf|doc|docx|xls|xlsx|zip|rar|7z|exe|apk)(\?.*)?$)"
         )
         # Only accept news from the last 24h (Crucial for Indexes)
         self.cutoff_date = datetime.now(timezone.utc) - cutoff
         
         # Expanded User Agent List for Rotation
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-            "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
-        ]
+        self.user_agents = BrowserFetcher.USER_AGENTS
 
         # Standard Headers to mimic a real browser
         self.headers = {
@@ -43,7 +40,7 @@ class BaseHarvester:
             "Upgrade-Insecure-Requests": "1",
         }
 
-    async def harvest(self, session, sources: List[dict]) -> list[dict]:
+    async def harvest(self, session, sources: List[dict], ignore_hashes: set = set()) -> list[dict]:
         """
         Orchestrator: Iterates sources, fetches data, and handles deduplication/merging.
         DO NOT OVERRIDE THIS in subclasses unless you want to change deduplication logic.
@@ -53,7 +50,7 @@ class BaseHarvester:
         for source in sources:
             # Delegate fetching to a method that subclasses can override
             try:
-                new_articles = await self.fetch_feed_articles(session, source)
+                new_articles = await self.fetch_feed_articles(session, source, ignore_hashes)
             except Exception as e:
                 logger.error(f"Feed process failed {source.get('url')}: {e}")
                 continue
@@ -68,7 +65,7 @@ class BaseHarvester:
 
         return list(unique_articles.values())
 
-    async def fetch_feed_articles(self, session, source: dict) -> List[dict]:
+    async def fetch_feed_articles(self, session, source: dict, ignore_hashes: set = set()) -> List[dict]:
         """
         Strategy Implementation: Fetches articles based on feed type.
         Subclasses should override THIS to add custom logic (e.g. Sitemap Index by Date).
@@ -88,6 +85,7 @@ class BaseHarvester:
                     allowed_sections=source.get("allowed_sections"),
                     url_pattern=source.get("url_pattern"),
                     is_ranked=is_ranked,
+                    ignore_hashes=ignore_hashes,
                 )
             else:
                 return await self._fetch_from_html(
@@ -97,6 +95,7 @@ class BaseHarvester:
                     allowed_sections=source.get("allowed_sections"),
                     url_pattern=source.get("url_pattern"),
                     is_ranked=is_ranked,
+                    ignore_hashes=ignore_hashes,
                 )
         
         # 2. RSS
@@ -106,28 +105,38 @@ class BaseHarvester:
                 url,
                 blocklist=source.get("blocklist"),
                 allowed_sections=source.get("allowed_sections"),
+                ignore_hashes=ignore_hashes,
             )
 
         # 3. Standard Sitemap
         elif feed_type == "sitemap":
+                
             return await self._fetch(
                 session,
                 url,
                 blocklist=source.get("blocklist"),
                 allowed_sections=source.get("allowed_sections"),
+                ignore_hashes=ignore_hashes,
+                use_browser=use_browser
             )
         
         # 4. Built-in Dynamic Sitemaps (New!)
         elif feed_type == "sitemap_index_id":
              # Assumes url_pattern contains the ID regex
              return await self.harvest_latest_id(
-                 session, url, id_pattern=source.get("url_pattern")
+                 session, url, id_pattern=source.get("url_pattern"), ignore_hashes=ignore_hashes
              )
              
         elif feed_type == "sitemap_index_date":
              # Assumes url_pattern contains the Date regex
              return await self.harvest_latest_date(
-                 session, url, date_pattern=source.get("url_pattern")
+                 session, url, date_pattern=source.get("url_pattern"), ignore_hashes=ignore_hashes
+             )
+        
+        elif feed_type == "sitemap_index_date_id":
+             # Assumes url_pattern contains a composite regex like (\d+-\d{4})
+             return await self.harvest_latest_date_id(
+                 session, url, pattern=source.get("url_pattern"), ignore_hashes=ignore_hashes
              )
 
         return []
@@ -159,6 +168,7 @@ class BaseHarvester:
         allowed_sections=None,
         url_pattern=None,
         is_ranked=False,
+        ignore_hashes=None,
     ) -> List[dict]:
         """
         Fast Static HTML Fetch using aiohttp.
@@ -171,13 +181,20 @@ class BaseHarvester:
                 if response.status != 200:
                     logger.error(f"Response Error {url}: {response.status}")
                     return []
+                
+                # Check Content-Type to avoid binary files
+                ctype = response.headers.get("Content-Type", "").lower()
+                if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
+                     logger.warning(f"Skipping non-HTML seed {url}: {ctype}")
+                     return []
+
                 html_content = await response.read()
         except Exception as e:
             logger.warning(f"HTML fetch fail {url}: {e}")
             return []
 
         return self._parse_html_links(
-            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked
+            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked, ignore_hashes
         )
 
     async def _fetch_from_html_browser(
@@ -188,74 +205,20 @@ class BaseHarvester:
         allowed_sections=None,
         url_pattern=None,
         is_ranked=False,
+        ignore_hashes=None,
     ) -> List[dict]:
         """
         Heavy Fetch using Playwright.
         Supports JavaScript rendering and Infinite Scroll.
         Suitable for SPAs like Band.com.br.
         """
-        logger.info(f"🎭 Browser Fetching: {url} (Scrolls: {scroll_depth})")
-        
-        async with async_playwright() as p:
-            # Launch without sandbox for Docker compatibility
-            # Ensure 'playwright install chromium' has been run in your Dockerfile
-            browser = await p.chromium.launch(
-                headless=True, 
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
-            )
+        html_content = await BrowserFetcher.fetch(url, scroll_depth=scroll_depth)
+        if not html_content:
+            return []
             
-            context = await browser.new_context(
-                user_agent=self.headers["User-Agent"],
-                viewport={"width": 1280, "height": 800}
-            )
-            page = await context.new_page()
-
-            try:
-                # 1. Load Page
-                await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000) # Settle time
-
-                # 2. Close potential popups/overlays
-                try: 
-                    await page.keyboard.press("Escape")
-                except: 
-                    pass
-
-                # 3. Robust Interaction Loop (Scroll / Click Load More)
-                for i in range(scroll_depth):
-                    # Strategy A: Look for "Load More" buttons
-                    try:
-                        load_btn = page.get_by_role(
-                            "button", 
-                            name=re.compile(r"carregar mais|ver mais|leia mais|veja mais", re.IGNORECASE)
-                        )
-                        if await load_btn.count() > 0 and await load_btn.first.is_visible():
-                            await load_btn.first.click(force=True)
-                            await page.wait_for_timeout(3000) # Give it time to load content
-                            continue 
-                    except: 
-                        pass
-                    
-                    # Strategy B: Keyboard Navigation (Works on overflow divs)
-                    await page.keyboard.press("End")
-                    await page.wait_for_timeout(500)
-                    
-                    # Strategy C: Mouse Wheel (Simulates human scroll)
-                    await page.mouse.wheel(0, 15000)
-                    await page.wait_for_timeout(2000)
-
-                html_content = await page.content()
-
-            except Exception as e:
-                logger.error(f"Browser Crash {url}: {e}")
-                await browser.close()
-                return []
-
-            await browser.close()
-            
-            return self._parse_html_links(
-                html_content, url, blocklist, allowed_sections, url_pattern, is_ranked
-            )
+        return self._parse_html_links(
+            html_content, url, blocklist, allowed_sections, url_pattern, is_ranked, ignore_hashes
+        )
 
     def _parse_html_links(
         self, 
@@ -264,7 +227,8 @@ class BaseHarvester:
         blocklist, 
         allowed_sections, 
         url_pattern, 
-        is_ranked
+        is_ranked,
+        ignore_hashes=None
     ):
         """
         Shared logic to extract links from HTML content (Static or Browser).
@@ -281,6 +245,7 @@ class BaseHarvester:
         
         articles = []
         
+        rank_counter = 0
         for tag in soup.find_all("a", href=True):
             link_text = tag.get_text(strip=True)
             if not link_text or len(link_text) < 5: 
@@ -304,14 +269,26 @@ class BaseHarvester:
                 if not re.search(url_pattern, full_url):
                     continue
 
-            # 3. Rank Assignment
-            # If is_ranked=True, we trust the order of appearance on the homepage.
+            # 3. Date Check (URL Heuristic)
+            # Extract YYYY-MM-DD or YYYY/MM/DD
+            url_date = None
+            date_match = re.search(r"(\d{4}[-/]\d{2}[-/]\d{2})", full_url)
+            if date_match:
+                date_str = date_match.group(1).replace("/", "-")
+                if not self._is_date_recent(date_str):
+                    continue
+                url_date = date_str
+
+            # 4. Rank Assignment
             rank = None
             if is_ranked:
-                rank = len(articles) + 1
+                rank_counter += 1
+                rank = rank_counter
             
-            # Attempt to extract date from URL (heuristic)
-            url_date = re.match(r"\d{4}-\d{2}-\d{2}|\d{4}/\d{2}/\d{2}", full_url)
+            # 5. Hash Check (Optimization)
+            url_hash = self._compute_hash(full_url)
+            if ignore_hashes and url_hash in ignore_hashes:
+                continue
 
             articles.append({
                 "title": link_text,
@@ -320,6 +297,7 @@ class BaseHarvester:
                 "published": url_date, # Often None here; Trafilatura handles extraction later
                 "content": "Unknown",
                 "rank": rank, # CRITICAL: Used by Publisher for "Hot Score"
+                "hash": url_hash
             })
             seen_urls.add(full_url)
 
@@ -331,33 +309,39 @@ class BaseHarvester:
         url: str,
         blocklist=None,
         allowed_sections=None,
+        ignore_hashes=None,
+        use_browser=False
     ) -> list[dict]:
         """ Standard Sitemap Fetcher (XML) """
         xml_content = None
-        
-        for agent in self.user_agents:
-            try:
-                headers = self.headers.copy()
-                headers["User-Agent"] = agent
-                
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=120), headers=headers
-                ) as response:
-                    if response.status == 200:
-                        xml_content = await response.read()
-                        break
-                    elif response.status == 403:
-                        logger.warning(f"403 Forbidden on {url} with UA {agent[:20]}... Rotating.")
-                        continue
-                    else:
-                        logger.error(f"Response Error {url}: {response.status}")
-                        return []
-            except Exception as e:
-                logger.warning(f"Sitemap fail {url} with UA {agent[:20]}: {e}")
-                continue
+        if not use_browser:
+            for agent in self.user_agents:
+                try:
+                    headers = self.headers.copy()
+                    headers["User-Agent"] = agent
+                    
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=120), headers=headers
+                    ) as response:
+                        if response.status == 200:
+                            xml_content = await response.read()
+                            break
+                        elif response.status == 403:
+                            logger.warning(f"403 Forbidden on {url} with UA {agent[:20]}... Rotating.")
+                            continue
+                        else:
+                            logger.error(f"Response Error {url}: {response.status}")
+                            return []
+                except Exception as e:
+                    logger.warning(f"Sitemap fail {url} with UA {agent[:20]}: {e}")
+                    continue
 
         if not xml_content:
-            return []
+            logger.warning(f" Attempting Browser...")
+            xml_content = await self._fetch_text_browser(url)
+            if not xml_content:
+                logger.error(f"❌ All User-Agents AND Browser Fallback failed for {url}")
+                return []
             
         soup = BeautifulSoup(xml_content, "xml")
         articles = []
@@ -374,6 +358,11 @@ class BaseHarvester:
             if not loc: continue
             link = loc.text.strip()
 
+            # 0. Hash Check
+            url_hash = self._compute_hash(link)
+            if ignore_hashes and url_hash in ignore_hashes:
+                continue
+
             # 1. Blocklist Check
             if to_block.search(link): continue
 
@@ -385,18 +374,18 @@ class BaseHarvester:
                 pdate = news.find("news:publication_date")
                 if pdate: pub_date = pdate.text
 
-            if pub_date:
-                # Basic check: is it from the current year?
-                if str(datetime.now().year) not in pub_date:
-                    continue
-
+            if pub_date and not self._is_date_recent(pub_date):
+                continue
+            
+            
             articles.append({
                 "title": "Unknown", # Sitemaps rarely have titles
                 "link": link,
                 "source": base_domain,
                 "published": pub_date or (lastmod.text if lastmod else None),
                 "content": "Unknown",
-                "rank": None # Sitemaps have no editorial rank
+                "rank": None, # Sitemaps have no editorial rank
+                "hash": url_hash
             })
             
         if not allowed_sections: return articles
@@ -409,7 +398,7 @@ class BaseHarvester:
         return filtered
 
     async def harvest_rss(
-        self, session: aiohttp.ClientSession, url, blocklist=None, allowed_sections=None
+        self, session: aiohttp.ClientSession, url, blocklist=None, allowed_sections=None, ignore_hashes=None
     ) -> list[dict]:
         """ RSS Feed Fetcher (XML) """
         try:
@@ -441,6 +430,11 @@ class BaseHarvester:
             else:
                 link = link_tag.text.strip()
 
+            # Hash Check
+            url_hash = self._compute_hash(link)
+            if ignore_hashes and url_hash in ignore_hashes:
+                continue
+
             if to_block.search(link): continue
 
             title_obj = item.find("title")
@@ -449,7 +443,7 @@ class BaseHarvester:
             date_tag = item.find(["pubDate", "published", "dc:date"])
             pub_date_str = date_tag.text.strip() if date_tag else None
 
-            if pub_date_str and str(datetime.now().year) not in pub_date_str:
+            if pub_date_str and not self._is_date_recent(pub_date_str):
                 continue
 
             content_encoded = item.find("content:encoded")
@@ -462,7 +456,8 @@ class BaseHarvester:
                 "source": base_domain,
                 "published": pub_date_str,
                 "content": content,
-                "rank": None # RSS is usually reverse chronological, not editorial rank
+                "rank": None, # RSS is usually reverse chronological, not editorial rank
+                "hash": url_hash
             })
 
         if not allowed_sections: return articles
@@ -474,7 +469,7 @@ class BaseHarvester:
                 filtered.append(art)
         return filtered
 
-    async def harvest_latest_id(self, session, url, id_pattern, blocklist=None, allowed_sections=None):
+    async def harvest_latest_id(self, session, url, id_pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
         """ 
         Fetch sitemap index by numeric ID.
         Used for sites that rotate sitemaps by ID (e.g. sitemap-1234.xml).
@@ -499,7 +494,7 @@ class BaseHarvester:
             match = id_re.search(loc_url)
             if match:
                 try:
-                    sitemap_id = int(match.group(1))
+                    sitemap_id = int(match.group(1) or 0)
                     valid_locs.append((sitemap_id, loc_url))
                 except ValueError: continue
 
@@ -509,9 +504,9 @@ class BaseHarvester:
         valid_locs.sort(key=lambda x: x[0], reverse=True)
         _, target_url = valid_locs[0]
         
-        return await self._fetch(session, target_url, blocklist, allowed_sections)
+        return await self._fetch(session, target_url, blocklist, allowed_sections, ignore_hashes)
 
-    async def harvest_latest_date(self, session, url, date_pattern, blocklist=None, allowed_sections=None):
+    async def harvest_latest_date(self, session, url, date_pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
         """ 
         Fetch sitemap index by Date string.
         Used for sites that rotate sitemaps by Date (e.g. sitemap-2026-01-12.xml).
@@ -544,4 +539,77 @@ class BaseHarvester:
         valid_locs.sort(key=lambda x: x[0], reverse=True)
         _, best_url = valid_locs[0]
 
-        return await self._fetch(session, best_url, blocklist, allowed_sections)
+        return await self._fetch(session, best_url, blocklist, allowed_sections, ignore_hashes)
+
+    async def _fetch_text_browser(self, url: str) -> Optional[bytes|str]:
+        """Fallback: Fetch raw content using Playwright."""
+        return await BrowserFetcher.fetch(url, return_bytes=True)
+
+    async def harvest_latest_date_id(self, session, url, pattern, blocklist=None, allowed_sections=None, ignore_hashes=None):
+        """ 
+        Fetch sitemap index with composite ID (e.g. 10-2024).
+        Splits by '-' and sorts by (Year, ID) descending.
+        """
+        try:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200: return []
+                xml_content = await response.read()
+        except Exception as e:
+            logger.warning(f"Sitemap Index fail {url}: {e}")
+            return []
+
+        soup = BeautifulSoup(xml_content, "xml")
+        maps = soup.find_all("sitemap")
+        pattern_re = re.compile(pattern)
+
+        valid_locs = []
+        for m in maps:
+            loc_tag = m.find("loc")
+            if not loc_tag: continue
+            loc_url = loc_tag.text.strip()
+            match = pattern_re.search(loc_url)
+            if match:
+                val = match.group(1) # e.g. "10-2024"
+                try:
+                    # Handle "10-2024" -> sort by (2024, 10)
+                    parts = val.split('-')
+                    if len(parts) == 2:
+                        sort_key = (int(parts[1]), int(parts[0]))
+                        valid_locs.append((sort_key, loc_url))
+                except: continue
+
+        if not valid_locs: return []
+        
+        # Sort Descending by Year then ID
+        valid_locs.sort(key=lambda x: x[0], reverse=True)
+        _, best_url = valid_locs[0]
+
+        return await self._fetch(session, best_url, blocklist, allowed_sections, ignore_hashes)
+
+    def _compute_hash(self, url: str) -> str:
+        return hashlib.md5(url.split("?")[0].encode()).hexdigest()
+
+    def _is_date_recent(self, date_str: str) -> bool:
+        """Parses date and checks if it is within the cutoff window."""
+        if not date_str: return True
+        try:
+            dt = None
+            # 1. Try ISO 8601 (Sitemaps, Atom)
+            try:
+                dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            except ValueError:
+                # 2. Try RFC 822 (RSS)
+                try:
+                    dt = parsedate_to_datetime(date_str)
+                except Exception:
+                    pass
+            
+            if dt:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt < self.cutoff_date:
+                    return False
+        except Exception:
+            # If we can't parse, we assume it's recent/valid to be safe
+            return True
+        return True

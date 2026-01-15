@@ -46,8 +46,6 @@ class NewsReviewerDomain:
         source_data, proposals_data = work_data
         
         # 2. Call LLM (Async IO)
-        # We process in sub-batches of 5 to fit in context window if necessary
-        # (Though the new batch_verify can handle ~10 easily, 5 is safe)
         match_found = False
         BATCH_SIZE = 5
         
@@ -56,11 +54,28 @@ class NewsReviewerDomain:
         for i in range(0, len(proposals_data), BATCH_SIZE):
             if match_found: break # Stop if we already merged
 
-            batch = proposals_data[i:i + BATCH_SIZE]
+            raw_batch = proposals_data[i:i + BATCH_SIZE]
+            valid_batch = []
+
+            # --- OPTIMIZATION: COST GATEKEEPER ---
+            for item in raw_batch:
+                target_event = item['target_obj']
+                if not self._passes_heuristic_check(source_data, target_event):
+                    self._update_proposal_status(
+                        session, 
+                        item['proposal_id'], 
+                        JobStatus.REJECTED, 
+                        "Auto-Reject: No Entity Overlap"
+                    )
+                    continue
+                valid_batch.append(item)
             
+            if not valid_batch:
+                continue
+
             candidates_payload = [
                 {'id': str(p['proposal_id']), 'text': p['event_context']} 
-                for p in batch
+                for p in valid_batch
             ]
             
             try:
@@ -75,7 +90,7 @@ class NewsReviewerDomain:
             # 3. Process Decisions
             results_map = {res.proposal_id: res for res in llm_results}
 
-            for prop_data in batch:
+            for prop_data in valid_batch:
                 pid = str(prop_data['proposal_id'])
                 if pid not in results_map:
                     self._update_proposal_status(session, pid, JobStatus.FAILED, "LLM Missed Item")
@@ -139,17 +154,29 @@ class NewsReviewerDomain:
         if not proposals: return None
 
         # Build Data
-        source_ctx = self._build_article_context(session, article)
+        source_data = {
+            'id': article.id, 
+            'title': article.title, 
+            'context_str': self._build_article_context(session, article),
+            'vector': article.embedding,
+            'entities': article.entities or []
+        }
+
         proposals_data = []
         for p in proposals:
             if not p.target_event: continue
             proposals_data.append({
                 'proposal_id': p.id,
                 'target_id': p.target_event_id,
-                'event_context': self._build_event_context(session, p.target_event)
+                'target_obj': p.target_event,
+                'event_context': self._build_event_context(
+                    session, 
+                    p.target_event, 
+                    source_vector=article.embedding # Pass vector for smart retrieval
+                )
             })
             
-        return {'id': article.id, 'title': article.title, 'context_str': source_ctx}, proposals_data
+        return source_data, proposals_data
 
     def _get_event_merge_data(self, session, source_id, proposal_ids):
         source = session.get(NewsEventModel, source_id)
@@ -165,18 +192,38 @@ class NewsReviewerDomain:
         )
         proposals = session.execute(stmt).scalars().all()
         
-        # Treat Source Event as the "Text"
-        source_ctx = self._build_event_context(session, source)
+        # Helper to extract entities from event (if direct list is missing)
+        source_ents = []
+        if getattr(source, 'entities', None):
+            source_ents = source.entities
+        elif source.interest_counts:
+            # Fallback: use keys from interest aggregation
+            for cat, items in source.interest_counts.items():
+                source_ents.extend(items.keys())
+
+        source_data = {
+            'id': source.id,
+            'title': source.title,
+            'context_str': self._build_event_context(session, source),
+            'vector': source.embedding_centroid,
+            'entities': source_ents
+        }
+
         proposals_data = []
         for p in proposals:
             if not p.target_event: continue
             proposals_data.append({
                 'proposal_id': p.id,
                 'target_id': p.target_event_id,
-                'event_context': self._build_event_context(session, p.target_event)
+                'target_obj': p.target_event,
+                'event_context': self._build_event_context(
+                    session, 
+                    p.target_event, 
+                    source_vector=source.embedding_centroid
+                )
             })
 
-        return {'id': source.id, 'title': source.title, 'context_str': source_ctx}, proposals_data
+        return source_data, proposals_data
 
     # --- EXECUTION ---
 
@@ -248,6 +295,32 @@ class NewsReviewerDomain:
         )
         session.commit()
 
+    def _passes_heuristic_check(self, source_data, target_event) -> bool:
+        """
+        Auto-reject if there is ZERO overlap in Named Entities to save LLM costs.
+        """
+        source_ents = set(source_data.get('entities', []))
+        
+        # Try to get entities from target event
+        target_ents = set()
+        if getattr(target_event, 'entities', None):
+             target_ents = set(target_event.entities)
+        elif target_event.interest_counts:
+             for cat, items in target_event.interest_counts.items():
+                 target_ents.update(items.keys())
+        
+        # If data is missing on either side, we let the AI decide (Fail Open)
+        if not source_ents or not target_ents:
+            return True 
+            
+        overlap = source_ents.intersection(target_ents)
+        
+        # If NO entities match, it's likely a false positive from the vector search
+        if len(overlap) == 0:
+            return False
+            
+        return True
+
     def _build_article_context(self, session, article) -> str:
         content_txt = ""
         # Try to get content from relation or query
@@ -258,24 +331,43 @@ class NewsReviewerDomain:
             if rec: content_txt = rec.content[:2000]
         return f"ARTICLE TITLE: {article.title}\nDATE: {article.published_date}\nTEXT: {content_txt}"
 
-    def _build_event_context(self, session, event) -> str:
+    def _build_event_context(self, session, event, source_vector: Optional[list] = None) -> str:
         text = f"EVENT TITLE: {event.title}\n"
         if event.summary and isinstance(event.summary, dict):
             text += f"SUMMARY: {event.summary.get('center') or event.summary.get('bias') or ''}\n"
 
-        # Optimization: Fetch only top 3 articles
-        stmt = (
-            select(ArticleModel)
-            .where(ArticleModel.event_id == event.id)
-            .order_by(desc(ArticleModel.published_date))
-            .limit(3)
-        )
-        arts = session.scalars(stmt).all()
-        
-        text += "RELATED ARTICLES:\n"
-        for art in arts:
-            content = "..."
-            rec = session.scalar(select(ArticleContentModel.content).where(ArticleContentModel.article_id == art.id))
-            if rec: content = rec[:200]
-            text += f"- [{art.published_date}] {art.title} : {content}...\n"
+        # --- OPTIMIZATION: SMART RETRIEVAL ---
+        if source_vector is not None:
+            # Find 3 MOST RELEVANT articles by Vector Distance
+            # Context Blindness Fix
+            stmt = (
+                select(ArticleModel, ArticleContentModel.content)
+                .join(ArticleContentModel, ArticleModel.id == ArticleContentModel.article_id)
+                .where(ArticleModel.event_id == event.id)
+                .order_by(ArticleModel.embedding.cosine_distance(source_vector))
+                .limit(3)
+            )
+            arts = session.execute(stmt).all()
+            
+            text += "RELEVANT CONTEXT (By Relevance):\n"
+            for art, content in arts:
+                text += f"- [{art.published_date}] {art.title} : {content[:200]}...\n"
+                
+        else:
+            # Fallback: Old Date-based Logic
+            stmt = (
+                select(ArticleModel)
+                .where(ArticleModel.event_id == event.id)
+                .order_by(desc(ArticleModel.published_date))
+                .limit(3)
+            )
+            arts = session.scalars(stmt).all()
+            
+            text += "RELATED ARTICLES (By Date):\n"
+            for art in arts:
+                content = "..."
+                rec = session.scalar(select(ArticleContentModel.content).where(ArticleContentModel.article_id == art.id))
+                if rec: content = rec[:200]
+                text += f"- [{art.published_date}] {art.title} : {content}...\n"
+            
         return text

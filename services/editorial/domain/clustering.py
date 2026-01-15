@@ -1,13 +1,17 @@
+from types import NoneType
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from dataclasses import dataclass
 
 from loguru import logger
-from sqlalchemy import delete, select, func, and_, desc, update, or_
+from sqlalchemy import delete, select, func, and_, desc, update, or_, text
 from sqlalchemy.orm import Session, aliased, sessionmaker, joinedload
 from sqlalchemy import create_engine
-
+import numpy as np
+from sklearn.cluster import DBSCAN
+from sklearn.metrics.pairwise import cosine_distances
 # Shared Libraries
 from news_events_lib.models import (
     NewsEventModel,
@@ -38,7 +42,7 @@ class ClusterResult:
 class NewsCluster:
     def __init__(self):
         self.settings = Settings()
-        self.engine = create_engine(str(self.settings.pg_dsn))
+        self.engine = create_engine(str(self.settings.pg_dsn), pool_pre_ping=True)
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
@@ -47,6 +51,14 @@ class NewsCluster:
         self.SIMILARITY_LOOSE = self.settings.similarity_loose
 
     # --- STANDARD ACTIONS ---
+
+    def _get_advisory_lock(self, session: Session, key_str: str):
+        """Acquires a Postgres Transaction-level Advisory Lock based on the string hash."""
+        # Create a deterministic 32-bit integer hash from the title
+        lock_id = zlib.crc32(key_str.encode('utf-8')) 
+        
+        # pg_advisory_xact_lock automatically releases at the end of the transaction
+        session.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": lock_id})
 
     def execute_merge_action(
         self, session: Session, article: ArticleModel, event: NewsEventModel
@@ -67,7 +79,7 @@ class NewsCluster:
                 MergeProposalModel.target_event_id != event.id,
                 MergeProposalModel.status == JobStatus.PENDING,
             )
-            .values(status=JobStatus.REJECTED)
+            .values(status=JobStatus.REJECTED, updated_at=datetime.now(timezone.utc))
         )
         session.execute(
             update(MergeProposalModel)
@@ -75,7 +87,7 @@ class NewsCluster:
                 MergeProposalModel.source_article_id == article.id,
                 MergeProposalModel.target_event_id == event.id,
             )
-            .values(status=JobStatus.APPROVED)
+            .values(status=JobStatus.APPROVED, updated_at=datetime.now(timezone.utc))
         )
 
         self._mark_article_queue_completed(session, article.id)
@@ -92,7 +104,7 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.source_article_id == article.id)
-            .values(status=JobStatus.REJECTED)
+            .values(status=JobStatus.REJECTED, updated_at=datetime.now(timezone.utc))
         )
 
         self._mark_article_queue_completed(session, article.id)
@@ -155,6 +167,13 @@ class NewsCluster:
                 target_counts[bias] = target_counts.get(bias, 0) + count
             target_event.article_counts_by_bias = target_counts
 
+        # E. Main Topics (Merge)
+        if source_event.main_topic_counts:
+            target_topics = dict(target_event.main_topic_counts or {})
+            for topic, count in source_event.main_topic_counts.items():
+                target_topics[topic] = target_topics.get(topic, 0) + count
+            target_event.main_topic_counts = target_topics
+
         # 3. Tombstone (Enterrar o Source)
         source_event.is_active = False
         source_event.status = EventStatus.MERGED
@@ -166,12 +185,12 @@ class NewsCluster:
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.target_event_id == source_event.id)
-            .values(status=JobStatus.REJECTED, reasoning="Target event was merged.")
+            .values(status=JobStatus.REJECTED, reasoning="Target event was merged.", updated_at=datetime.now(timezone.utc))
         )
         session.execute(
             update(MergeProposalModel)
             .where(MergeProposalModel.source_event_id == source_event.id)
-            .values(status=JobStatus.REJECTED, reasoning="Source event was merged.")
+            .values(status=JobStatus.REJECTED, reasoning="Source event was merged.", updated_at=datetime.now(timezone.utc))
         )
 
         # Remove jobs pendentes do evento morto para não travar workers
@@ -186,10 +205,10 @@ class NewsCluster:
         # Se o alvo já estava publicado, força re-publicação para atualizar Hot Score e Posição
         if target_event.status == EventStatus.PUBLISHED:
             logger.info(f"🔄 Re-Queueing Published Event: {target_event.title}")
-            self._trigger_event_publisher(session, target_event.id)
-        else:
-            # Fluxo normal: vai para o Enhancer (Resumo/LLM)
-            self._trigger_event_enhancement(session, target_event.id)
+
+      
+        # Fluxo normal: vai para o Enhancer (Resumo/LLM) -> publisher
+        self._trigger_event_enhancement(session, target_event.id)
 
     # --- HELPERS DE FILA ---
 
@@ -270,6 +289,7 @@ class NewsCluster:
         diff_date: timedelta = timedelta(days=5),
         limit: int = 10,
         rrf_k: int = 60,
+        decay_rate: float = 0.05,
     ):
         # 1. Semantic Search CTE
         semantic_subq = (
@@ -336,9 +356,16 @@ class NewsCluster:
         sem_alias = aliased(semantic_subq, name="sem")
         kw_alias = aliased(keyword_subq, name="kw")
 
-        score_expression = func.coalesce(
-            1.0 / (rrf_k + sem_alias.c.rank), 0.0
-        ) + func.coalesce(1.0 / (rrf_k + kw_alias.c.rank), 0.0)
+        # Time Decay: Penalize events far from target_date
+        # hours_diff = abs(target_date - last_updated_at) in hours
+        date_ref = func.coalesce(NewsEventModel.last_updated_at, NewsEventModel.created_at)
+        hours_diff = func.abs(func.extract('epoch', target_date - date_ref)) / 3600.0
+        decay_factor = 1.0 / (1.0 + (decay_rate * hours_diff))
+
+        score_expression = (
+            func.coalesce(1.0 / (rrf_k + sem_alias.c.rank), 0.0) + 
+            func.coalesce(1.0 / (rrf_k + kw_alias.c.rank), 0.0)
+        ) * decay_factor
 
         distance_expression = func.coalesce(sem_alias.c.dist, 1.0)
 
@@ -374,14 +401,29 @@ class NewsCluster:
     def cluster_existing_article(
         self, session: Session, article: ArticleModel
     ) -> ClusterResult:
+        # 0. Age Check: Ignore articles older than 7 days
+        if article.published_date:
+            pub_date = article.published_date
+            if pub_date.tzinfo is None:
+                pub_date = pub_date.replace(tzinfo=timezone.utc)
+            
+            if pub_date < datetime.now(timezone.utc) - timedelta(days=7):
+                return ClusterResult("IGNORED", None, [], "Article too old (> 7 days)")
+
+        # 1. LOCKING PHASE
+        # Lock based on the title to serialize duplicate stories (Race Condition Fix)
+        self._get_advisory_lock(session, article.title)
+
         text_query = self.derive_search_query(article)
         vector = article.embedding
 
         if vector is None or len(vector) == 0:
             return ClusterResult("ERROR", None, [], "Missing Vector")
 
+        # Ensure target_date is valid (fallback to now)
+        target_dt = article.published_date or datetime.now(timezone.utc)
         candidates = self.search_news_events_hybrid(
-            session, text_query, vector, article.published_date
+            session, text_query, vector, target_dt
         )
 
         if not candidates:
@@ -405,6 +447,22 @@ class NewsCluster:
             return ClusterResult("NEW", new_id, [], reason)
 
         if self.SIMILARITY_STRICT < vec_dist < self.SIMILARITY_LOOSE:
+            # HEURISTIC: "The Hot Hand" (Ambiguity Hell Fix)
+            # If the best match is VERY recent (< 4h) and VERY active (> 10 articles),
+            # we relax the strictness. It's likely the breaking news everyone is writing about.
+            is_fresh = False
+            if best_ev.last_updated_at:
+                last_upd = best_ev.last_updated_at
+                if last_upd.tzinfo is None:
+                    last_upd = last_upd.replace(tzinfo=timezone.utc)
+                is_fresh = (datetime.now(timezone.utc) - last_upd).total_seconds() < 14400 # 4 hours
+            
+            is_big = best_ev.article_count > 10
+            
+            if is_fresh and is_big and vec_dist < 0.12:
+                 self._link_to_event(session, best_ev, article, vector)
+                 return ClusterResult("MERGE", best_ev.id, [], "Auto-Merge: Hot Topic Heuristic")
+
             self._create_proposal(session, article, best_ev, vec_dist)
             return ClusterResult(
                 "PROPOSE",
@@ -472,11 +530,16 @@ class NewsCluster:
 
         # 3. Interests & Metadata
         EventAggregator.aggregate_interests(event, article.interests)
+        EventAggregator.aggregate_main_topics(event, article.main_topics)
         EventAggregator.aggregate_metadata(event, article)
-
-        # 4. Local Search Optimization (Keep search_text updated)
-        if event.search_text:
-            event.search_text += f" {article.title}"
+        
+        # 4. Local Search Optimization (Black Hole Fix)
+        # Pruning: Keep only the last 50 unique words to prevent keyword soup
+        current_text = event.search_text or ""
+        new_keywords = f"{current_text} {article.title}".split()
+        unique_words = list(dict.fromkeys(reversed(new_keywords)))[:50]
+        event.search_text = " ".join(reversed(unique_words))
+        
         event.last_updated_at = datetime.now(timezone.utc)
 
         # 5. Helper for Bias Distribution (Specific to Clustering logic)
@@ -500,6 +563,7 @@ class NewsCluster:
         init_bias = {}
         init_counts = {}
         init_ownership = {}
+        init_main_topics = {}
 
         if article.interests:
             for category, items in article.interests.items():
@@ -514,6 +578,10 @@ class NewsCluster:
 
             if article.newspaper.ownership_type:
                 init_ownership[article.newspaper.ownership_type] = 1
+
+        if article.main_topics:
+            for topic in article.main_topics:
+                init_main_topics[topic] = 1
 
         # 2. Create Event (With initial Score values)
         # Rank Logic: If the first article has a rank, use it.
@@ -535,6 +603,7 @@ class NewsCluster:
             
             # Aggregations
             interest_counts=init_interests,
+            main_topic_counts=init_main_topics,
             article_counts_by_bias=init_counts,
             bias_distribution=init_bias,
             ownership_stats=init_ownership,
@@ -586,3 +655,123 @@ class NewsCluster:
             logger.info(
                 f"⚠️ Proposal created: {article.title[:20]} -> {event.title[:20]} ({reason})"
             )
+    def calculate_sub_clusters(
+        self, 
+        session: Session, 
+        event: NewsEventModel, 
+        method: str = "DBSCAN_WITH_TIME"
+    ) -> List[List[ArticleModel]]:
+        """
+        Analyzes an event's articles and splits them into cohesive sub-groups 
+        using DBSCAN on a custom (Semantic + Temporal) distance matrix.
+        """
+        # 1. Fetch Data
+        # We need all articles with their embeddings
+        articles = session.scalars(
+            select(ArticleModel)
+            .where(ArticleModel.event_id == event.id)
+            .order_by(ArticleModel.published_date)
+        ).all()
+
+        if len(articles) < 3:
+            return []  # Too small to split
+
+        # 2. Prepare Vectors & Timestamps
+        valid_articles = []
+        vectors = []
+        timestamps = []
+        
+        for art in articles:
+            if not isinstance(art.embedding, NoneType) and len(art.embedding) == 768: # Ensure valid vector
+                valid_articles.append(art)
+                vectors.append(art.embedding)
+                
+                # Normalize time to "Hours since first article"
+                dt = art.published_date
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+                timestamps.append(dt.timestamp() / 3600.0) # Hours
+
+        if not valid_articles:
+            return []
+
+        # Convert to Numpy
+        X_vec = np.array(vectors)
+        # FIX: Keep shape as (N, 1)
+        X_time = np.array(timestamps).reshape(-1, 1) 
+        
+        # 3. Compute Distance Matrix
+        # A. Semantic Distance (0.0 to 1.0+)
+        dist_semantic = cosine_distances(X_vec)
+
+        # B. Temporal Distance (FIXED BROADCASTING)
+        # We perform (N, 1) - (1, N) to get (N, N) matrix
+        t_diff = np.abs(X_time - X_time.T) 
+        
+        # Scale: 24h gap adds 0.15 distance
+        dist_time = (t_diff / 24.0) * 0.15
+
+        # C. Combined Distance
+        # Shape is now safely (N, N)
+        dist_final = dist_semantic + dist_time
+
+        # 4. Run DBSCAN
+        # eps=0.22 -> Cluster Radius. 
+        # min_samples=2 -> Even a pair can form a cluster.
+        db = DBSCAN(eps=0.22, min_samples=2, metric='precomputed')
+        labels = db.fit_predict(dist_final)
+
+        # 5. Group Results
+        clusters = {}
+        noise = []
+
+        for idx, label in enumerate(labels):
+            art = valid_articles[idx]
+            if label == -1:
+                noise.append(idx)
+            else:
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(art)
+
+        # 6. Handle Noise (The "Smart Orphan" Logic)
+        # Threshold: 0.25 (Same as your Loose Collision/Proposal threshold)
+        NOISE_MERGE_THRESHOLD = 0.25 
+        
+        if clusters and noise:
+            for noise_idx in noise:
+                min_dist = 999.0
+                best_cluster = None
+                
+                # Compare noise item against valid cluster members
+                for label, cluster_arts in clusters.items():
+                    # Heuristic: Compare against the first member (Representative)
+                    # Ideally, compare against all and take average, but this is fast.
+                    member_idx = valid_articles.index(cluster_arts[0]) 
+                    d = dist_final[noise_idx][member_idx]
+                    
+                    if d < min_dist:
+                        min_dist = d
+                        best_cluster = label
+                
+                # --- LOGIC CHANGE HERE ---
+                if best_cluster is not None and min_dist <= NOISE_MERGE_THRESHOLD:
+                    # It's close enough, just an outlier. Pull it in.
+                    clusters[best_cluster].append(valid_articles[noise_idx])
+                else:
+                    # It is TOO FAR. Orphan it.
+                    # We create a new unique label for this orphan
+                    new_orphan_label = 1000 + noise_idx
+                    clusters[new_orphan_label] = [valid_articles[noise_idx]]
+                    logger.info(f"✂️ Orphaned noise article: '{valid_articles[noise_idx].title[:20]}' (Dist {min_dist:.2f} > {NOISE_MERGE_THRESHOLD})")
+
+        # 7. Format Output
+        result_groups = list(clusters.values())
+        
+        # Note: We allow groups of size 1 (orphans) to be returned now.
+        if not result_groups:
+             return []
+
+        # Sort groups by time (Oldest event first)
+        result_groups.sort(key=lambda arts: min(a.published_date for a in arts))
+
+        return result_groups

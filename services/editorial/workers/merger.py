@@ -77,7 +77,7 @@ class NewsMergerWorker:
                     NewsEventModel.is_active == True,
                     NewsEventModel.last_updated_at >= cutoff,
                     NewsEventModel.id.not_in(pending_subq),
-                    NewsEventModel.id.not_in(processing_subq)
+                    NewsEventModel.id.not_in(processing_subq),
                 )
                 .order_by(NewsEventModel.last_updated_at.desc())
             )

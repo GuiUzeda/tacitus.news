@@ -50,6 +50,10 @@ services:
       network: host
     env_file:
       - .env
+    # Fix for Playwright/Chromium crashing (SIGSEGV)
+    ipc: host
+    security_opt:
+      - seccomp:unconfined
     command: python services/editorial/workers/harvester.py
     depends_on:
       - postgres
@@ -64,6 +68,19 @@ services:
     env_file:
       - .env
     command: python services/editorial/workers/filter.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
+  worker-enricher:
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/enricher.py
     depends_on:
       - postgres
     networks:

@@ -84,11 +84,15 @@ class NewsEventModel(BaseModel):
         JSONB, default=dict, nullable=True
     )
     
+    main_topic_counts: Mapped[Optional[Dict[str, int]]] = mapped_column(
+        JSONB, default=dict, nullable=True
+    )
+    
     ownership_stats: Mapped[Optional[Dict[str, int]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
     
-    article_count: Mapped[int] = mapped_column(Integer, default=1)
+    article_count: Mapped[int] = mapped_column(Integer, default=1, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -140,6 +144,12 @@ class NewsEventModel(BaseModel):
     
     first_article_date = mapped_column(DateTime, nullable=True)
     last_article_date = mapped_column(DateTime, nullable=True)
+    # New Field: Semantic importance derived by LLM (0-100)
+    ai_impact_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ai_impact_reasoning: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Optional: Categorical classification for weighting!
+    # e.g., "POLITICS", "ENTERTAINMENT", "SCIENCE", "CRIME"
+    category_tag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
     # New Field: Sum of editorial weights (e.g. CNN#1 + Fox#5)
     editorial_score: Mapped[float] = mapped_column(Float, default=0.0)   
@@ -322,7 +332,7 @@ class MergeProposalModel(BaseModel):
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
-
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     # Relationships
     source_article: Mapped[Optional["ArticleModel"]] = relationship(
         foreign_keys=[source_article_id]

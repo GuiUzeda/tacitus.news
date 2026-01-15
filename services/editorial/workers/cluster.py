@@ -87,6 +87,11 @@ class NewsClusterWorker(BaseQueueWorker):
                 job.status = JobStatus.COMPLETED
                 logger.success(f"Action {decision.action}: {article.title[:20]} -> ENHANCE")
 
+            elif decision.action == "IGNORED":
+                job.status = JobStatus.COMPLETED
+                job.msg = decision.reason
+                logger.info(f"Action {decision.action}: {article.title[:20]} -> SKIPPED")
+
             elif decision.action in ["PROPOSE", "PROPOSE_MULTI"]:
                 job.status = JobStatus.COMPLETED
                 job.msg = f"Parked: {decision.reason}"

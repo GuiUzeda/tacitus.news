@@ -113,6 +113,7 @@ class NewsEnhancerWorker(BaseQueueWorker):
                 EventsQueueModel.queue_name == self.queue_name,
                 ~exists(active_proposals)
             )
+            .order_by(NewsEventModel.article_count.desc())
             .order_by(EventsQueueModel.created_at.asc())
             .limit(self.batch_size)
             .with_for_update(skip_locked=True)
@@ -143,7 +144,7 @@ class NewsEnhancerWorker(BaseQueueWorker):
             if result.rowcount > 0:
                 logger.info(f"🧹 Reset {result.rowcount} stuck enhancer jobs.")
 
-    def _cleanup_stuck_jobs(self):
+    def _cleanup_stuck_jobs(self, session=None):
         timeout = timedelta(minutes=15)
         cutoff = datetime.now(timezone.utc) - timeout
         

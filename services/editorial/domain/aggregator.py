@@ -1,4 +1,3 @@
-import numpy as np
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from news_events_lib.models import NewsEventModel, ArticleModel
@@ -42,7 +41,7 @@ class EventAggregator:
     @staticmethod
     def update_centroid(event: NewsEventModel, new_vector: List[float]):
         """
-        Updates the event centroid using weighted average.
+        Updates the event centroid using incremental mean formula.
         Assumes aggregate_basic_stats has already incremented article_count.
         """
         if new_vector is None or len(new_vector) == 0: return
@@ -53,16 +52,18 @@ class EventAggregator:
         if n <= 1 or event.embedding_centroid is None or len(event.embedding_centroid) == 0:
             event.embedding_centroid = new_vector
             return
-            
-        if n == 0: n = 1 # Safety guard against division by zero
 
-        # Weighted Average Calculation
-        # Since n includes the current article, the 'old' weight is n-1.
-        current_centroid = np.array(event.embedding_centroid)
-        vec = np.array(new_vector)
-        
-        updated = ((current_centroid * (n - 1)) + vec) / n
-        event.embedding_centroid = updated.tolist()
+        # Optimization: Saturation Threshold
+        # For large clusters, the centroid stabilizes. Skipping updates saves CPU/DB.
+        if n > 500:
+            return
+
+        # Stable Online Update: new_avg = old_avg + (new_val - old_avg) / n
+        # Pure Python is faster here than Numpy due to array creation overhead for single vectors.
+        event.embedding_centroid = [
+            c + (v - c) / n 
+            for c, v in zip(event.embedding_centroid, new_vector)
+        ]
 
     @staticmethod
     def aggregate_interests(event: NewsEventModel, interests: Dict[str, List[str]]|None):
@@ -79,6 +80,18 @@ class EventAggregator:
                 current[category][item] = current[category].get(item, 0) + 1
         
         event.interest_counts = current
+
+    @staticmethod
+    def aggregate_main_topics(event: NewsEventModel, topics: List[str] | None):
+        """Aggregates main topics into the event."""
+        if not topics: return
+
+        current = dict(event.main_topic_counts or {})
+        
+        for topic in topics:
+            current[topic] = current.get(topic, 0) + 1
+        
+        event.main_topic_counts = current
 
     @staticmethod
     def aggregate_metadata(event: NewsEventModel, article: ArticleModel):

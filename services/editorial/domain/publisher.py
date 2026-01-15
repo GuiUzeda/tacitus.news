@@ -1,146 +1,430 @@
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Tuple, List, Dict
 from loguru import logger
 from sqlalchemy.orm import Session
-from news_events_lib.models import NewsEventModel, EventStatus, JobStatus
+from sqlalchemy import exists, not_, or_, select, and_, desc
+from news_events_lib.models import (
+    NewsEventModel,
+    EventStatus,
+    JobStatus,
+    MergeProposalModel,
+)
 from config import Settings
+from domain.clustering import NewsCluster
+
 
 class NewsPublisherDomain:
     def __init__(self):
         self.settings = Settings()
-        
-        # Pesos para o Algoritmo
-        self.WEIGHT_EDITORIAL = 2.0  # Autoridade da Fonte
-        self.WEIGHT_VOLUME = 4.0     # Quantidade de Artigos
-        self.WEIGHT_RECENCY = 40.0   # Bônus de Notícia Fresca
-        
-        # Limiares
-        self.HERO_THRESHOLD = 80.0       # Score para ser Manchete
-        self.BLIND_SPOT_VOL_MIN = 30.0   # Score mínimo para considerar um "Blind Spot" relevante
+        self.cluster = NewsCluster()
+
+        # --- CONFIGURATION (EQUILIBRADA) ---
+
+        # FIX 1: PESOS LOGARÍTMICOS
+        # Achata a curva. Editorial Score 300 vira ~230 pontos, não 600.
+        # Permite que eventos novos compitam sem precisarmos de bônus absurdos.
+        self.WEIGHT_EDITORIAL_LOG_FACTOR = 40.0
+        self.WEIGHT_VOLUME_LOG_FACTOR = 10.0
+
+        # FIX 2: RECÊNCIA MODERADA
+        # Bônus máximo de 180 (suficiente para destaque, mas não para vencer eventos gigantes sozinhos)
+        # Meia-vida de 24h: A notícia permanece "fresca" por um dia inteiro, caindo suavemente.
+        self.RECENCY_MAX_BONUS = 180.0
+        self.RECENCY_HALFLIFE_HOURS = 24.0
+
+        # Collision Thresholds
+        self.COLLISION_THRESHOLD_STRICT = 0.05  # 95% Similar -> Auto Merge
+        self.COLLISION_THRESHOLD_LOOSE = 0.15  # 85% Similar -> Proposal
+
+        # Baseline de Feed (Ajuste conforme seu feeds.json)
+        self.BASELINE_BIAS = {"left": 0.3, "center": 0.4, "right": 0.3}
+
+        self.TOPIC_MULTIPLIERS = {
+            "Politics": 1.5,
+            "Economy": 1.4,
+            "World": 1.3,
+            "Crime": 1.2,
+            "Science": 0.8,
+            "Technology": 0.9,
+            "Entertainment": 0.6,
+            "Sports": 0.5,
+            "Lifestyle": 0.4,
+            "Nature": 0.4,
+            "Oddities": 0.3,
+            "Mercado da Bola": 0.1,
+            "Futebol Brasileiro": 0.1,
+        }
+
+        self.MIN_ARTICLES_FOR_BLIND_SPOT = 3
+        self.CLICKBAIT_PENALTY_THRESHOLD = 0.7
 
     def publish_event_job(self, session: Session, job) -> bool:
-        """
-        Processa um job da fila de Publicação.
-        Retorna True se processado com sucesso, False se ignorado.
-        """
         event = job.event
-        
-        # --- RACE CONDITION CHECK A (Early Exit) ---
-        # Se o evento foi fundido enquanto estava na fila, ele estará inativo.
+
         if not event or not event.is_active:
-            logger.warning(f"👻 Publisher ignorou evento morto/fundido: {job.event_id}")
-            job.status = JobStatus.COMPLETED 
-            job.msg = "Event merged/deleted before publish"
+            logger.warning(f"👻 Publisher ignored dead event: {job.event_id}")
+            job.status = JobStatus.COMPLETED
             return False
 
-        # 1. Calcular Score e Insights (A Lógica Ground News)
-        hot_score, insights, metadata = self.calculate_spectrum_score(event)
-        
-        # 2. Quality Gates (Filtros)
-        # Se for "Breaking" ou "Blind Spot", passa direto pelo filtro de volume
-        is_special = "BREAKING" in insights or "BLIND_SPOT" in insights
-        
-        if not is_special and event.article_count < 2:
-            # Notícia fraca e sem relevância especial. Ignora silenciosamente.
-            # Não falhamos o job, apenas deixamos ele lá para tentar de novo se crescer.
+        # --- 1. SMART COLLISION CHECK ---
+        # Checks vectors, time, AND history (rejected proposals)
+        collision = self._check_collision_smart(session, event)
+
+        if collision:
+
+            # NEW: Handle the "Pending" block we added
+            if collision.get("status") == "WAITING":
+                job.status = JobStatus.WAITING
+                job.msg = "Paused: Pending Merge Proposal"
+                return False
+            
+            existing_id = collision["id"]
+            distance = collision["score"]
+            is_auto = collision["auto_merge"]
+            existing_event = session.get(NewsEventModel, existing_id)
+
+            # A. AUTO-MERGE (Strict Match)
+            if is_auto and existing_event:
+                logger.warning(
+                    f"⚡ PUBLISHER AUTO-MERGE: '{event.title}' -> '{existing_event.title}' (Dist: {distance:.3f})"
+                )
+
+                # Use the robust merge logic from Clustering Domain
+                # This moves articles, updates counts, and handles the "dead" event
+                self.cluster.execute_event_merge(session, event, existing_event)
+
+                # Trigger Enhancer on the SURVIVOR (Published Event) to update summary
+                self.cluster._trigger_event_enhancement(session, existing_event.id)
+
+                job.status = JobStatus.COMPLETED
+                job.msg = f"Auto-Merged into {existing_event.title}"
+                return False
+
+            # B. PROPOSAL (Soft Match)
+            # Only create proposal if NOT auto-merged
+            logger.info(
+                f"💡 PUBLISHER PROPOSAL: '{event.title}' ?= '{collision['title']}' (Dist: {distance:.3f})"
+            )
+
+            proposal = MergeProposalModel(
+                proposal_type="event_merge",
+                source_event_id=event.id,  # Unpublished (Source)
+                target_event_id=existing_id,  # Published (Target)
+                distance_score=distance,
+                reasoning=f"Publisher Gatekeeper (Dist: {distance:.3f})",
+                status=JobStatus.PENDING,  # Sent to Reviewer
+            )
+            session.add(proposal)
+
+            # Stop the pipeline. The Reviewer must decide.
+            job.status = JobStatus.COMPLETED
+            job.msg = f"Blocked by Proposal -> {existing_id}"
+            return False
+
+        # --- 2. STANDARD PUBLISHING FLOW ---
+        event_topics = (
+            list(event.main_topic_counts.keys()) if event.main_topic_counts else []
+        )
+
+        # Calculate Score
+        hot_score, insights, metadata = self.calculate_spectrum_score(
+            event, event_topics
+        )
+
+        # Quality Gates
+        is_breaking = "BREAKING" in insights
+        is_blind_spot = "BLIND_SPOT" in insights
+        is_high_impact = "HIGH_IMPACT" in insights
+        is_soft_news = any(
+            t in event_topics
+            for t in ["Lifestyle", "Entertainment", "Nature", "Sports"]
+        )
+
+        if (
+            is_soft_news
+            and not (is_breaking or is_high_impact)
+            and event.article_count < 5
+        ):
             job.status = JobStatus.WAITING
-            job.msg = "Low Volume: Waiting for more articles"
+            job.msg = "Soft News: Low Volume"
             return False
 
-        # 3. Executar Publicação
+        if (
+            not (is_breaking or is_blind_spot or is_high_impact)
+            and event.article_count < 2
+        ):
+            job.status = JobStatus.WAITING
+            job.msg = "Low Volume: Waiting"
+            return False
+
         self._execute_publish(session, event, job, hot_score, insights, metadata)
         return True
 
-    def calculate_spectrum_score(self, event: NewsEventModel) -> Tuple[float, List[str], Dict]:
-        """
-        Retorna: (Score Numérico, Lista de Tags, Metadados de Viés)
-        """
+    def _check_collision_smart(self, session: Session, candidate_event: NewsEventModel):
+        if candidate_event.embedding_centroid is None:
+            return None
+
+        # --- STEP 1: PENDING CHECK (Prevent publishing if under review) ---
+        # If this event is already waiting for a merge decision, DO NOT publish it.
+        # We check if this event is the SOURCE of a pending proposal.
+        pending_proposal = session.execute(
+            select(MergeProposalModel.id)
+            .where(
+                MergeProposalModel.source_event_id == candidate_event.id,
+                MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
+            )
+        ).scalar()
+
+        if pending_proposal:
+            logger.info(f"⏸️ Event {candidate_event.id} is pending merge review. Pausing publish.")
+            # We return a special flag or handle this in the caller. 
+            # For now, returning None would publish it (BAD). 
+            # We must signal a "Soft Block".
+            # Hack: Return a 'fake' collision that forces a waiting state, or simply:
+            return {
+                "id": None, 
+                "title": "Pending Proposal", 
+                "score": 0.0, 
+                "auto_merge": False, 
+                "status": "WAITING" # Custom signal
+            }
+
+        # --- STEP 2: VECTOR SEARCH ---
+        
+        # Define the math expression for reuse
+        distance_expr = NewsEventModel.embedding_centroid.cosine_distance(
+            candidate_event.embedding_centroid
+        )
+
+        # Exclude pairs that have ANY history (Rejected, Pending, etc)
+        # If we previously rejected A->B, we don't want to check A->B again.
+        has_proposal = exists(
+            select(1).where(
+                or_(
+                    and_(
+                        MergeProposalModel.source_event_id == candidate_event.id,
+                        MergeProposalModel.target_event_id == NewsEventModel.id
+                    ),
+                    and_(
+                        MergeProposalModel.source_event_id == NewsEventModel.id,
+                        MergeProposalModel.target_event_id == candidate_event.id
+                    )
+                )
+            )
+        )
+
+        stmt = (
+            select(
+                NewsEventModel.id, 
+                NewsEventModel.title, 
+                NewsEventModel.first_article_date,
+                NewsEventModel.created_at,
+                distance_expr.label("distance")
+            )
+            .where(NewsEventModel.status == EventStatus.PUBLISHED)
+            .where(NewsEventModel.is_active == True)
+            
+            # ✅ FIX: Filter by the WIDEST threshold (Loose), not the Strict one.
+            .where(distance_expr <= self.COLLISION_THRESHOLD_LOOSE) 
+            
+            # ✅ FIX: Ensure we don't check pairs that already have proposals
+            .where(~has_proposal) 
+            
+            .order_by(distance_expr)
+            .limit(1)
+        )
+        
+        result = session.execute(stmt).first()
+        if not result:
+            return None
+
+        existing_id, existing_title, existing_first_date, existing_created, distance = result
+        
+        # --- STEP 3: TIME CHECK ---
+        existing_ref = existing_first_date or existing_created
+        if existing_ref.tzinfo is None: existing_ref = existing_ref.replace(tzinfo=timezone.utc)
+        
+        candidate_ref = candidate_event.first_article_date or candidate_event.created_at or datetime.now(timezone.utc)
+        if candidate_ref.tzinfo is None: candidate_ref = candidate_ref.replace(tzinfo=timezone.utc)
+
+        time_diff_hours = abs((candidate_ref - existing_ref).total_seconds() / 3600.0)
+
+        # A. AUTO-MERGE CONDITIONS (Strict + Recent)
+        if distance <= self.COLLISION_THRESHOLD_STRICT and time_diff_hours <= 72:
+            return {
+                "id": existing_id, 
+                "title": existing_title, 
+                "score": distance, 
+                "auto_merge": True
+            }
+
+        # B. PROPOSAL CONDITIONS (Loose + Very Recent)
+        if distance <= self.COLLISION_THRESHOLD_LOOSE and time_diff_hours <= 24:
+             return {
+                "id": existing_id, 
+                "title": existing_title, 
+                "score": distance, 
+                "auto_merge": False
+            }
+
+        return None
+    def calculate_spectrum_score(
+        self, event: NewsEventModel, topics: List[str]
+    ) -> Tuple[float, List[str], Dict]:
         score = 0.0
         insights = []
-        
-        # A. Editorial Authority (O peso dos Jornais)
-        # Herdado do Cluster (Soma dos Ranks + Tiers)
-        score += (event.editorial_score * self.WEIGHT_EDITORIAL)
-        
-        # B. Volume (Logarítmico)
-        # Evita que 1000 artigos distorçam o gráfico. 10 artigos = ~23 pts. 
-        score += (math.log1p(event.article_count) * self.WEIGHT_VOLUME)
 
-        # C. Recency (Usa a data real da primeira notícia)
+        # --- A. BASE METRICS (LOGARITHMIC) ---
+        # Importante: Substituímos a multiplicação linear por Logaritmo
+        if event.editorial_score > 0:
+            score += (
+                math.log1p(event.editorial_score) * self.WEIGHT_EDITORIAL_LOG_FACTOR
+            )
+
+        score += math.log1p(event.article_count) * self.WEIGHT_VOLUME_LOG_FACTOR
+
+        # --- B. RECENCY CURVE (Suavizada) ---
         ref_date = event.first_article_date or event.created_at
-        if ref_date.tzinfo is None: ref_date = ref_date.replace(tzinfo=timezone.utc)
-        
+        if ref_date.tzinfo is None:
+            ref_date = ref_date.replace(tzinfo=timezone.utc)
         age_hours = (datetime.now(timezone.utc) - ref_date).total_seconds() / 3600.0
-        
-        if age_hours < 4.0:
-            score += self.WEIGHT_RECENCY
-            insights.append("BREAKING") # Tag para o Frontend piscar
-        elif age_hours > 48.0:
-            score -= (age_hours * 0.5) # Penalidade de Arquivo
 
-        # D. SPECTRUM ANALYSIS (Ground News Logic)
+        # Decay:
+        # 0h  = +180 pts
+        # 12h = +127 pts
+        # 24h = +90 pts
+        # 48h = +45 pts
+        if age_hours < 72:
+            recency_score = self.RECENCY_MAX_BONUS * (
+                0.5 ** (age_hours / self.RECENCY_HALFLIFE_HOURS)
+            )
+            score += recency_score
+
+            # Tag Breaking apenas para as primeiras ~12-15 horas
+            if recency_score > 120:
+                insights.append("BREAKING")
+        else:
+            # Penalidade leve para arquivo
+            score -= age_hours * 0.1
+
+        # --- C. SEMANTIC & IMPACT ---
+        if topics:
+            best_multiplier = 1.0
+            for topic in topics:
+                norm_topic = topic.capitalize()
+                mult = self.TOPIC_MULTIPLIERS.get(norm_topic, 1.0)
+                best_multiplier *= mult
+            score *= best_multiplier
+
+        impact = event.ai_impact_score or 50
+        semantic_multiplier = 0.4 + (impact / 100 * 1.6)
+        score *= semantic_multiplier
+
+        # Clickbait Penalty
+        if event.clickbait_distribution:
+            values = list(event.clickbait_distribution.values())
+            if values:
+                avg_clickbait = sum(values) / len(values)
+                if avg_clickbait > self.CLICKBAIT_PENALTY_THRESHOLD:
+                    score *= 0.7
+                    insights.append("CLICKBAIT_RISK")
+
+        if impact >= 85:
+            insights.append("HIGH_IMPACT")
+        elif impact <= 30:
+            insights.append("LOW_IMPACT")
+
+        # --- D. SPECTRUM BONUS ---
         bias_counts = event.article_counts_by_bias or {}
-        # Filtra apenas o espectro político
-        sides = {k: v for k, v in bias_counts.items() if k in ['left', 'center', 'right'] and v > 0}
+        sides = {
+            k: v
+            for k, v in bias_counts.items()
+            if k in ["left", "center", "right"] and v > 0
+        }
         total_sides = len(sides)
-        
-        # Mapa de tradução para Insights
-        missing_sides = {'left', 'center', 'right'} - sides.keys()
 
         if total_sides == 3:
-            # CENÁRIO 1: Consenso / Debate Nacional
-            score *= 1.8 
+            score *= 1.5
             insights.append("FULL_SPECTRUM")
-            
         elif total_sides == 2:
-            # CENÁRIO 2: Contraponto (Saudável)
             score *= 1.2
-            
         elif total_sides == 1:
-            # CENÁRIO 3: Bolha Unilateral
             dominant_side = list(sides.keys())[0]
-            
-            # Precisamos distinguir "Fofoca de Nicho" vs "Ponto Cego Importante"
-            # Se o score base for alto (>30), significa que Jornais Grandes estão falando.
-            if score > self.BLIND_SPOT_VOL_MIN:
-                score *= 1.5 # Boost para forçar a aparição no feed geral
-                
-                # Gera a tag inversa: Se só a Esquerda fala, é um Blind Spot para a Direita?
-                # Ou simplificamos: "Coverage: Only Left"
+            baseline_prob = self.BASELINE_BIAS.get(dominant_side, 0.33)
+            blind_spot_multiplier = 1.0 + (1.0 - baseline_prob)
+
+            if event.article_count >= self.MIN_ARTICLES_FOR_BLIND_SPOT:
+                score *= 1.2 * blind_spot_multiplier
                 insights.append(f"ONLY_{dominant_side.upper()}")
-                
-                # Tag específica de Blind Spot (Alerta de Viés)
                 insights.append("BLIND_SPOT")
             else:
-                # É apenas ruído de nicho. Penaliza.
-                score *= 0.6 
+                score *= 0.8
                 insights.append("NICHE")
 
         return round(score, 2), insights, {"bias_counts": bias_counts}
 
-    def _execute_publish(self, session: Session, event: NewsEventModel, job, score, insights, metadata):
-        # --- RACE CONDITION CHECK B (Late Check) ---
-        # Recarrega o evento para garantir que ninguém o fundiu durante o cálculo
+    def _execute_publish(
+        self, session: Session, event: NewsEventModel, job, score, insights, metadata
+    ):
         session.refresh(event)
         if not event.is_active:
             return
 
         event.status = EventStatus.PUBLISHED
         event.hot_score = score
-        
-        # Salvar insights no banco (campo summary ou novo campo metadata)
-        # Aqui, vamos injetar no campo 'interest_counts' ou criar um campo específico no futuro.
-        # Por enquanto, assumimos que o frontend vai recalcular ou usamos um campo JSON existente.
+
         if event.summary and isinstance(event.summary, dict):
             summary_update = dict(event.summary)
             summary_update["insights"] = insights
             event.summary = summary_update
-        
+
         if not event.published_at:
-             event.published_at = datetime.now(timezone.utc)
+            event.published_at = datetime.now(timezone.utc)
 
         job.status = JobStatus.COMPLETED
         job.msg = f"Published (Score: {score:.1f}) | Tags: {insights}"
-        
-        logger.success(f"🚀 {event.title[:30]}... | Score: {score} | {insights}")
+
+        logger.success(f"🚀 {event.title[:40]}... | Score: {score} | {insights}")
+
+    def publish_event_direct(self, session: Session, event: NewsEventModel):
+        """
+        Directly scores and publishes an event.
+        Designed for the Splitter to immediately put new sub-events live.
+        """
+        if not event.is_active:
+            return
+
+        # 1. Calculate Score (Uses your new Balanced Logic)
+        topics = list(event.main_topic_counts.keys()) if event.main_topic_counts else []
+        hot_score, insights, metadata = self.calculate_spectrum_score(event, topics)
+
+        # 2. Quality Gate (Simplified)
+        # Since this came from a Mega-Event split, we trust it has volume.
+        # We only check if the LLM failed to generate a title or impact score.
+        if not event.title or event.ai_impact_score is None:
+            logger.warning(
+                f"⚠️ Direct Publish Aborted: Incomplete Metadata for {event.id}"
+            )
+            return
+
+        # 3. Execute Publish
+        # We don't need the 'job' wrapper here.
+        event.status = EventStatus.PUBLISHED
+        event.hot_score = hot_score
+
+        # Update insights in the summary JSON
+        # if event.summary and isinstance(event.summary, dict):
+        #     summary_update = dict(event.summary)
+        #     summary_update["insights"] = insights
+        #     event.summary = summary_update
+
+        # Important: Set published_at to NOW to give it a fresh start on the feed
+        event.published_at = datetime.now(timezone.utc)
+
+        session.add(event)
+        session.commit()
+
+        logger.success(
+            f"🚀 Direct Publish: {event.title} | Score: {hot_score} | {insights}"
+        )
