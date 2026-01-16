@@ -31,9 +31,13 @@ class NewsEnhancerDomain:
         self.DEBOUNCE_MINUTES = 10  # Don't re-summarize if updated < 10 mins ago
     async def enhance_event_job(self, session: Session, job: EventsQueueModel):
         event: NewsEventModel | None = job.event
-        if not event:
+        if not event :
             job.status = JobStatus.FAILED
             job.msg = "Event Not Found"
+            return
+        if not event.is_active:
+            job.status = JobStatus.COMPLETED
+            job.msg = "Event Inactive"
             return
 
         # 1. FETCH THE "DELTA" (Articles ready to be integrated)
@@ -267,7 +271,7 @@ class NewsEnhancerDomain:
             session.flush()
         
         if not summary_inputs:
-            event.is_active = False
+            # event.is_active = False Maintain the event active
             event.status = EventStatus.ARCHIVED
             session.add(event)
             if commit: session.commit()
@@ -278,7 +282,7 @@ class NewsEnhancerDomain:
         try:
             event_summary = await self.enhancer.summarize_event(summary_inputs, previous_summary=None)
             if not event_summary:
-                event.is_active = False
+                # event.is_active = False Maintain the event active
                 event.status = EventStatus.ARCHIVED
                 session.add(event)
                 if commit: session.commit()

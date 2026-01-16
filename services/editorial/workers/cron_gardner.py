@@ -121,7 +121,7 @@ class GardnerService:
         if events:
             for event in events:
                 event.status = EventStatus.ARCHIVED
-                event.is_active = False
+                # event.is_active = False   Maintain the event active
             session.commit()
             logger.info(f"   -> Archived {len(events)} stale events.")
 

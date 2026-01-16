@@ -487,8 +487,37 @@ class CloudNewsAnalyzer:
         # though the strict check above handles mostly.
         return f"{text[:head_len]}\n\n[...TRUNCATED SECTIONS...]\n\n{text[-tail_len:]}"
 
-    @with_retry(max_retries=4, base_delay=60)
     async def analyze_articles_batch(
+        self, texts: List[str]
+    ) -> List[LLMNewsOutputSchema]:
+        """
+        Public wrapper that ensures the output list size matches the input list size,
+        handling exceptions and padding/truncation.
+        """
+        try:
+            results = await self._analyze_articles_batch_internal(texts)
+        except Exception as e:
+            logger.error(f"Batch analysis failed after retries: {e}")
+            return [
+                LLMNewsOutputSchema(status="error", error_message=f"Batch Failed: {str(e)}")
+                for _ in texts
+            ]
+
+        # Ensure exact size match
+        if len(results) < len(texts):
+            logger.warning(f"LLM returned {len(results)} items, expected {len(texts)}. Padding with errors.")
+            results.extend([
+                LLMNewsOutputSchema(status="error", error_message="LLM dropped this item")
+                for _ in range(len(texts) - len(results))
+            ])
+        elif len(results) > len(texts):
+            logger.warning(f"LLM returned {len(results)} items, expected {len(texts)}. Truncating.")
+            results = results[:len(texts)]
+
+        return results
+
+    @with_retry(max_retries=4, base_delay=60)
+    async def _analyze_articles_batch_internal(
         self, texts: List[str]
     ) -> List[LLMNewsOutputSchema]:
         """
