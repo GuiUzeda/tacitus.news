@@ -653,8 +653,9 @@ class NewsCluster:
     def calculate_sub_clusters(
         self, 
         session: Session, 
-        event: NewsEventModel, 
-        method: str = "DBSCAN_WITH_TIME"
+        event: NewsEventModel,
+        eps: float = 0.22, 
+        min_samples: int = 2
     ) -> List[List[ArticleModel]]:
         """
         Analyzes an event's articles and splits them into cohesive sub-groups 
@@ -712,7 +713,7 @@ class NewsCluster:
         # 4. Run DBSCAN
         # eps=0.22 -> Cluster Radius. 
         # min_samples=2 -> Even a pair can form a cluster.
-        db = DBSCAN(eps=0.22, min_samples=2, metric='precomputed')
+        db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed')
         labels = db.fit_predict(dist_final)
 
         # 5. Group Results

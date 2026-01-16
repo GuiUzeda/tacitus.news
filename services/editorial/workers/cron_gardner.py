@@ -156,10 +156,11 @@ class GardnerService:
 
     async def _process_split(self, session: Session, parent_event):
         logger.info(f"⚡ Analyzing {parent_event.title} ({parent_event.article_count} articles)...")
+        eps = min(0.3*50/max(parent_event.article_count,1), 0.7)
         
         # 1. CLUSTER ANALYSIS
         sub_clusters = self.cluster_domain.calculate_sub_clusters(
-            session, parent_event, method="DBSCAN_WITH_TIME"
+            session, parent_event, eps=eps
         )
         
         if len(sub_clusters) < 2:

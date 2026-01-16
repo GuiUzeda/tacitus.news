@@ -68,7 +68,7 @@ class HarvesterWorker:
                 with self.SessionLocal() as session:
                     try:
                         # We use wait_for to prevent the splitter from hanging the harvester indefinitely
-                        await asyncio.wait_for(self.splitter.run_cycle(session), timeout=600)
+                        await asyncio.wait_for(self.splitter.run_cycle(session), timeout=3600)
                     except asyncio.TimeoutError:
                         logger.error("Splitter timed out!")
                     except Exception as e:
