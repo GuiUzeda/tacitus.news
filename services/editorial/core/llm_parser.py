@@ -115,12 +115,15 @@ class LLMRouter:
             "intern": [
                 "gemini/gemma-3-4b-it",
                 "groq/llama-3.1-8b-instant",
-                "meta-llama/llama-4-scout-17b-16e-instruct",
+                "groq/meta-llama/llama-4-scout-17b-16e-instruct",
             ],
             "mid": [
                 "gemini/gemma-3-12b-it",
                 "groq/moonshotai/kimi-k2-instruct",
                 "groq/meta-llama/llama-4-maverick-17b-128e-instruct",
+                "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+                "groq/llama-3.1-8b-instant",
+                "gemini/gemma-3-4b-it",
             ],
             "senior": [
                 "gemini/gemma-3-27b-it",
@@ -178,7 +181,6 @@ class LLMRouter:
         # 1. Regex to find the largest JSON-like structure (DOTALL to span newlines)
         # Matches strictly from the first [ or { to the last ] or }
         clean = re.sub(r"```(json)?|```|\n", "", text).strip()
-
 
         try:
             return json.loads(clean)
@@ -851,7 +853,9 @@ class CloudNewsAnalyzer:
 
         **TASK INSTRUCTIONS:**
         1. **Synthesis:** Merge new facts with existing data. Prioritize recent updates.
-        2. **Bias Detection:** Look for omissions. What facts are specific sides ignoring?
+        2. **Bias Detection:** Analyze the framing differences between the *available* sources.
+           - **CRITICAL:** If a side (Left/Right) is missing, do NOT mention it. Do NOT say "The Left is silent" or "Lack of perspective". 
+           - **Action:** If only one side exists, analyze its specific narrative without pointing out the absence of the other.
         3. **Language:** Output strictly in **PORTUGUESE (PT-BR)**.
         4. **Handling Missing Sides:** If a side (Left/Right) has no sources, set it to empty string `""`.
 

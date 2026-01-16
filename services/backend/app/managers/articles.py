@@ -11,7 +11,7 @@ from fastapi_pagination.types import (
 
 from news_events_lib.models import ArticleModel
 
-from news_events_lib.schemas import NewsArticleReadSchema
+from app.api.v1.schemas.articles import NewsArticleReadSchema
 
 
 class ArticlesManager(BaseManager):

@@ -2,9 +2,9 @@ import React from "react";
 import { Activity } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { cn, getImpactColor } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { FeedEvent } from "../types";
-
+import { getImpactColor } from "@/lib/utils";
 
 export const HeroEvent = ({ event }: { event: FeedEvent }) => {
   const isHighImpact = event.impact > 80;
@@ -39,26 +39,32 @@ export const HeroEvent = ({ event }: { event: FeedEvent }) => {
             <div className="flex items-center gap-4 pt-2">
               <div className="flex -space-x-2">
                 {/* Abstract representation of sources */}
-                {[...Array(Math.min(event.sourceCount, 4))].map((_, i) => (
+                {Object.values(event.sources || {}).slice(0, 4).map((source: any, i) => (
                   <div
                     key={i}
-                    className="h-6 w-6 rounded-full border border-white bg-zinc-200"
-                  />
+                    className="h-6 w-6 rounded-full border border-white bg-zinc-200 overflow-hidden"
+                    title={source.name}
+                  >
+                    {/* {source.icon && (
+                                
+                                <img src={source.icon} alt={source.name} className="h-full w-full object-cover" />
+                              )} */}
+                  </div>
                 ))}
-                {event.sourceCount > 4 && (
+                {Object.values(event.sources || {}).length > 4 && (
                   <div className="flex h-6 w-6 items-center justify-center rounded-full border border-white bg-zinc-100 text-[9px] font-bold text-zinc-500">
-                    +{event.sourceCount - 4}
+                    +{Object.values(event.sources || {}).length - 4}
                   </div>
                 )}
               </div>
               <span className="font-mono text-xs text-zinc-400">
-                {event.sourceCount} SOURCES ANALYZED
+                {event.articles} FOTNTE{event.articles > 1 ? "S" : ""}
               </span>
             </div>
           </div>
 
           {/* The Hook: Impact Score */}
-          <div className="flex flex-col items-center justify-start pt-2">
+          <div className="flex flex-col items-center justify-start pt-2 flex-grow justify-between">
             <div
               className={cn(
                 "flex h-24 w-24 items-center justify-center rounded-full border-[6px] bg-white font-mono text-4xl font-bold tracking-tighter transition-all",
@@ -70,6 +76,11 @@ export const HeroEvent = ({ event }: { event: FeedEvent }) => {
             <span className="mt-2 font-mono text-[10px] font-bold uppercase tracking-widest text-zinc-400">
               Impact
             </span>
+            <div className="flex h-1.5 w-16 overflow-hidden rounded-full bg-zinc-100" title={`L:${event.biasDistribution.left || 0} C:${event.biasDistribution.center || 0} R:${event.biasDistribution.right || 0}`}>
+              <div className="bg-blue-500" style={{ flex: event.biasDistribution.left }} />
+              <div className="bg-zinc-400" style={{ flex: event.biasDistribution.center || 0 }} />
+              <div className="bg-red-500" style={{ flex: event.biasDistribution.right }} />
+            </div>
           </div>
         </div>
       </CardContent>

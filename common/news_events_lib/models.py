@@ -78,20 +78,20 @@ class NewsEventModel(BaseModel):
         nullable=True,
         comment='Structure: {"left": "markdown", "right": "markdown", "center": "markdown"}',
     )
-    
+
     # interests are entities with classification
     interest_counts: Mapped[Optional[Dict[str, Dict[str, int]]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
-    
+
     main_topic_counts: Mapped[Optional[Dict[str, int]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
-    
+
     ownership_stats: Mapped[Optional[Dict[str, int]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
-    
+
     article_count: Mapped[int] = mapped_column(Integer, default=1, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_updated_at: Mapped[datetime] = mapped_column(
@@ -108,7 +108,10 @@ class NewsEventModel(BaseModel):
     stance_distribution: Mapped[Dict[str, Dict[str, int]]] = mapped_column(
         JSONB, default=dict
     )
-    clickbait_distribution: Mapped[Dict[str, float]] = mapped_column(JSONB, default=dict)
+    stance: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.0)
+    clickbait_distribution: Mapped[Dict[str, float]] = mapped_column(
+        JSONB, default=dict
+    )
     article_counts_by_bias: Mapped[Dict[str, int]] = mapped_column(JSONB, default=dict)
 
     last_summarized_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
@@ -126,22 +129,29 @@ class NewsEventModel(BaseModel):
     )
 
     articles: Mapped[List["ArticleModel"]] = relationship(back_populates="event")
-    
+
     # Merged Event Logic (Tombstoning)
     merged_into_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("news_events.id"), nullable=True
     )
-    
+
     # Self-referential relationship
     merged_into: Mapped[Optional["NewsEventModel"]] = relationship(
         remote_side=[id], backref="merged_children"
     )
-    hot_score: Mapped[float] = mapped_column(Float, default=0.0,server_default="0.0", index=True)
-    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    hot_score: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0.0", index=True
+    )
+    published_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
+    is_blind_spot: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, index=True)
+    blind_spot_side: Mapped[Optional[str]]= mapped_column(String, nullable=True, index=True)
+
 
     # (e.g., if CNN had it at #1, this is 1)
     best_source_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    
+
     first_article_date = mapped_column(DateTime, nullable=True)
     last_article_date = mapped_column(DateTime, nullable=True)
     # New Field: Semantic importance derived by LLM (0-100)
@@ -150,9 +160,15 @@ class NewsEventModel(BaseModel):
     # Optional: Categorical classification for weighting!
     # e.g., "POLITICS", "ENTERTAINMENT", "SCIENCE", "CRIME"
     category_tag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    
+    publisher_isights: Mapped[Optional[list[str]]] = mapped_column(
+        ARRAY(Text), nullable=True
+    )
+    sources_snapshot: Mapped[dict[str, Dict[str, str]]] = mapped_column(
+        JSONB, default=dict
+    )
+
     # New Field: Sum of editorial weights (e.g. CNN#1 + Fox#5)
-    editorial_score: Mapped[float] = mapped_column(Float, default=0.0)   
+    editorial_score: Mapped[float] = mapped_column(Float, default=0.0)
     __table_args__ = (
         Index(
             "ix_active_events_embedding",
@@ -201,7 +217,7 @@ class ArticleModel(BaseModel):
     clickbait_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     main_topics: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
     entities: Mapped[Optional[List[str]]] = mapped_column(ARRAY(Text), nullable=True)
-    
+
     interests: Mapped[Optional[Dict[str, List[str]]]] = mapped_column(
         JSONB, default=dict, nullable=True
     )
@@ -252,6 +268,7 @@ class NewspaperModel(BaseModel):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    home_url: Mapped[str] = mapped_column(String, nullable=True)
     name: Mapped[str] = mapped_column(String)
     bias: Mapped[str] = mapped_column(String)
     description: Mapped[str] = mapped_column(Text)
@@ -285,10 +302,13 @@ class FeedModel(BaseModel):
     feed_type: Mapped[str] = mapped_column(String, server_default="sitemap")
     is_ranked: Mapped[bool] = mapped_column(Boolean, default=False)
     # New flag: If True, uses Playwright. If False, uses aiohttp.
-    use_browser_render: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    
+    use_browser_render: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+
     # Optional: How many times to scroll down to load more content?
     scroll_depth: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
 
 class AuthorModel(BaseModel):
     @declared_attr.directive
@@ -319,18 +339,24 @@ class MergeProposalModel(BaseModel):
     proposal_type: Mapped[str] = mapped_column(String, default="article_merge")
 
     # The Source (One of these must be set)
-    source_article_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("articles.id"), nullable=True)
-    source_event_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("news_events.id"), nullable=True)
+    source_article_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("articles.id"), nullable=True
+    )
+    source_event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("news_events.id"), nullable=True
+    )
 
     # The Target (Always an Event)
     target_event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("news_events.id"))
 
     distance_score: Mapped[float] = mapped_column(Float)
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    
+
     # Status: PENDING, APPROVED, REJECTED, FAILED, PROCESSING
-    status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING)
-    
+    status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus), default=JobStatus.PENDING
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     # Relationships
@@ -344,11 +370,13 @@ class MergeProposalModel(BaseModel):
         foreign_keys=[target_event_id]
     )
 
-
-
     __table_args__ = (
         # Unique constraint for Article merges
-        UniqueConstraint("source_article_id", "target_event_id", name="uq_article_merge_pair"),
+        UniqueConstraint(
+            "source_article_id", "target_event_id", name="uq_article_merge_pair"
+        ),
         # Unique constraint for Event merges
-        UniqueConstraint("source_event_id", "target_event_id", name="uq_event_merge_pair"),
+        UniqueConstraint(
+            "source_event_id", "target_event_id", name="uq_event_merge_pair"
+        ),
     )

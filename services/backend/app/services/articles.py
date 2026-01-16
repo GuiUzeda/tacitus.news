@@ -9,7 +9,7 @@ from fastapi_filter.contrib.sqlalchemy import Filter
 from fastapi_pagination.types import AsyncItemsTransformer
 from sqlalchemy.orm import Session
 
-from news_events_lib.schemas import NewsArticleReadSchema
+from app.api.v1.schemas.articles import NewsArticleReadSchema
 
 
 class ArticlesService(DBSessionMixin):

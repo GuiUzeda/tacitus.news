@@ -126,9 +126,24 @@ class EventAggregator:
         elif stance_score >= 0.35: bucket = "supportive"
         
         stance_dist = dict(event.stance_distribution or {})
-        if bias not in stance_dist: stance_dist[bias] = {}
-        stance_dist[bias][bucket] = stance_dist[bias].get(bucket, 0) + 1
+        if bias not in stance_dist: 
+            stance_dist[bias] = {'critical': 0, 'supportive': 0, 'neutral': 0, 'total': 0.0}
+        
+        # Update Bias Average (Incremental)
+        stats = stance_dist[bias]
+        current_n = stats.get('critical', 0) + stats.get('supportive', 0) + stats.get('neutral', 0)
+        current_avg = stats.get('total', 0.0)
+        
+        new_n = current_n + 1
+        stats[bucket] = stats.get(bucket, 0) + 1
+        stats['total'] = current_avg + (stance_score - current_avg) / new_n
+        
         event.stance_distribution = stance_dist
+        
+        # Update Global Stance (Incremental)
+        total_n = sum(s.get('critical', 0) + s.get('supportive', 0) + s.get('neutral', 0) for s in stance_dist.values())
+        current_global = event.stance or 0.0
+        event.stance = current_global + (stance_score - current_global) / total_n
 
     @staticmethod
     def aggregate_clickbait(event: NewsEventModel, bias: str, score: float):
@@ -155,6 +170,160 @@ class EventAggregator:
         event.clickbait_distribution = cb_dist
     
     @staticmethod
+    def aggregate_bias_counts(event: NewsEventModel, article: ArticleModel):
+        """Aggregates the count of articles per bias."""
+        if not article.newspaper or not article.newspaper.bias: return
+        
+        bias = article.newspaper.bias
+        current = dict(event.article_counts_by_bias or {})
+        current[bias] = current.get(bias, 0) + 1
+        event.article_counts_by_bias = current
+
+    @staticmethod
+    def aggregate_source_snapshot(event: NewsEventModel, article: ArticleModel):
+        """Updates the snapshot of sources covering the event."""
+        if not article.newspaper: return
+        
+        name = article.newspaper.name
+        snapshot = dict(event.sources_snapshot or {})
+        
+        # Store metadata for the source
+        snapshot[name] = {
+            "icon": article.newspaper.icon_url,
+            "name": name,
+            "id": str(article.newspaper.id),
+            "logo": article.newspaper.logo_url,
+            "bias": article.newspaper.bias
+        }
+        event.sources_snapshot = snapshot
+
+    @staticmethod
+    def merge_event_stats(target: NewsEventModel, source: NewsEventModel):
+        """
+        Merges statistics from source event into target event.
+        Handles all counters, distributions, and metadata.
+        """
+        # 1. Scalars
+        target.article_count += source.article_count
+        target.editorial_score = (target.editorial_score or 0.0) + (source.editorial_score or 0.0)
+        
+        if source.best_source_rank:
+            if target.best_source_rank is None or source.best_source_rank < target.best_source_rank:
+                target.best_source_rank = source.best_source_rank
+
+        # 2. Dates
+        if source.first_article_date:
+            if not target.first_article_date or source.first_article_date < target.first_article_date:
+                target.first_article_date = source.first_article_date
+        
+        if source.last_article_date:
+            if not target.last_article_date or source.last_article_date > target.last_article_date:
+                target.last_article_date = source.last_article_date
+
+        # 3. Simple Dictionaries (Sum Values)
+        for field in ['main_topic_counts', 'ownership_stats', 'article_counts_by_bias']:
+            source_dict = getattr(source, field) or {}
+            target_dict = dict(getattr(target, field) or {})
+            for k, v in source_dict.items():
+                target_dict[k] = target_dict.get(k, 0) + v
+            setattr(target, field, target_dict)
+
+        # 4. Nested Dictionaries (Sum Values)
+        for field in ['interest_counts']:
+            source_dict = getattr(source, field) or {}
+            target_dict = dict(getattr(target, field) or {})
+            for cat, items in source_dict.items():
+                if cat not in target_dict:
+                    target_dict[cat] = {}
+                for item, count in items.items():
+                    target_dict[cat][item] = target_dict[cat].get(item, 0) + count
+            setattr(target, field, target_dict)
+            
+        # 4b. Stance Distribution (Weighted Merge)
+        if source.stance_distribution:
+            s_dist = source.stance_distribution
+            t_dist = dict(target.stance_distribution or {})
+            
+            # Helper to get count from a distribution entry
+            get_n = lambda d: d.get('critical', 0) + d.get('supportive', 0) + d.get('neutral', 0)
+            
+            # Merge Global Stance
+            s_total_n = sum(get_n(d) for d in s_dist.values())
+            t_total_n = sum(get_n(d) for d in t_dist.values())
+            
+            if (s_total_n + t_total_n) > 0:
+                target.stance = (
+                    ((target.stance or 0.0) * t_total_n) + ((source.stance or 0.0) * s_total_n)
+                ) / (s_total_n + t_total_n)
+
+            # Merge Per-Bias Distribution
+            for bias, s_stats in s_dist.items():
+                if bias not in t_dist:
+                    t_dist[bias] = s_stats.copy()
+                else:
+                    t_stats = t_dist[bias]
+                    s_n = get_n(s_stats)
+                    t_n = get_n(t_stats)
+                    
+                    # Weighted Average for Total
+                    if (s_n + t_n) > 0:
+                        t_stats['total'] = ((t_stats.get('total', 0.0) * t_n) + (s_stats.get('total', 0.0) * s_n)) / (s_n + t_n)
+                    
+                    for k in ['critical', 'supportive', 'neutral']:
+                        t_stats[k] = t_stats.get(k, 0) + s_stats.get(k, 0)
+            
+            target.stance_distribution = t_dist
+
+        # 5. Bias Distribution (Merge Lists)
+        if source.bias_distribution:
+            target_dist = dict(target.bias_distribution or {})
+            for bias, ids in source.bias_distribution.items():
+                existing = set(target_dist.get(bias, []))
+                existing.update(ids)
+                target_dist[bias] = list(existing)
+            target.bias_distribution = target_dist
+
+        # 6. Clickbait Distribution (Weighted Average)
+        # Weighting based on stance_distribution counts (enhanced articles)
+        if source.clickbait_distribution:
+            target_cb = dict(target.clickbait_distribution or {})
+            source_cb = source.clickbait_distribution
+            
+            def get_enhanced_count(ev, b):
+                dist = ev.stance_distribution or {}
+                if b in dist:
+                    return sum(dist[b].values())
+                return 0
+
+            for bias, s_score in source_cb.items():
+                t_score = target_cb.get(bias)
+                s_count = get_enhanced_count(source, bias)
+                
+                if t_score is None:
+                    target_cb[bias] = s_score
+                else:
+                    t_count = get_enhanced_count(target, bias)
+                    total = s_count + t_count
+                    if total > 0:
+                        target_cb[bias] = ((t_score * t_count) + (s_score * s_count)) / total
+            
+            target.clickbait_distribution = target_cb
+
+        # 7. Sources Snapshot (Update)
+        if source.sources_snapshot:
+            target_snap = dict(target.sources_snapshot or {})
+            target_snap.update(source.sources_snapshot)
+            target.sources_snapshot = target_snap
+
+        # 8. Publisher Insights (Union)
+        if source.publisher_isights:
+            current = set(target.publisher_isights or [])
+            current.update(source.publisher_isights)
+            target.publisher_isights = list(current)
+            
+
+
+    @staticmethod
     def recalculate_event(event: NewsEventModel, articles: List[ArticleModel]):
         """
         Full recalculation of an event's stats from a list of articles.
@@ -179,6 +348,16 @@ class EventAggregator:
                 if best_rank is None or art.source_rank < best_rank:
                     best_rank = art.source_rank
                 total_score += (10.0 / float(art.source_rank))
+        
+        # 3. Stance (Average)
+        stance_sum = 0.0
+        stance_n = 0
+        for art in articles:
+            if art.newspaper and art.stance is not None:
+                stance_sum += art.stance
+                stance_n += 1
+        
+        event.stance = (stance_sum / stance_n) if stance_n > 0 else 0.0
         
         event.best_source_rank = best_rank
         event.editorial_score = total_score

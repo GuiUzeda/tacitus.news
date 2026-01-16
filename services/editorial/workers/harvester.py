@@ -16,7 +16,7 @@ import aiohttp
 from config import Settings
 from domain.harvesting import HarvestingDomain
 from news_events_lib.models import NewspaperModel, FeedModel, ArticleModel
-from workers.cron_splitter import EventSplitterService
+from cron_gardner import GardnerService
 class HarvesterWorker:
     def __init__(self):
         self.settings = Settings()
@@ -31,7 +31,7 @@ class HarvesterWorker:
         
         # Instantiate Domain (manages ProcessPool)
         self.domain = HarvestingDomain()
-        self.splitter = EventSplitterService() # 👈 Initialize Splitter
+        self.splitter = GardnerService() # 👈 Initialize Splitter
         self.worker_id = str(uuid.uuid4())[:8]
         
     async def run(self):

@@ -16,8 +16,11 @@ class EventsFilter(Filter):
     last_updated_at__gte: Optional[datetime] = Query(None)
     created_at__lte: Optional[datetime] = Query(None)
     created_at__gte: Optional[datetime] = Query(None)
+    is_blind_spot: Optional[bool] = Query(None)
+    blind_spot_side: Optional[str] = Query(None)
     order_by: Optional[list[str]] = Query(None)
-    
+
+
     
     class Constants(Filter.Constants):
         model= NewsEventModel

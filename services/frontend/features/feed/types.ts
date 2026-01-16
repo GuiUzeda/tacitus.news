@@ -2,12 +2,40 @@ export interface FeedEvent {
   id: string;
   title: string;
   summary: string;
-  category: "POLITICS" | "ECONOMY" | "WORLD" | "TECH";
+  category: string;
   time: string;
   impact: number;
-  sourceCount: number;
+  sources: { [key: string]: { [key: string]: string } };
   clickbait: number;
-  biasDistribution: { left: number; center: number; right: number };
+  biasDistribution: { left: number; center: number; right: number};
   isBlindspot?: boolean;
-  subtitle?: string
+  subtitle?: string;
+  sinceLastUpdate: number;
+  stanceDistribution: { left: number; center: number; right: number; }
+  articles: number;
+  blindSpotSide?: string;
+  
+}
+
+export interface NewsEvent {
+  id: string;
+  title: string;
+  subtitle: string;
+  category_tag: string;
+  last_updated_at: string;
+  ai_impact_score: number;
+  article_counts_by_bias: { [key: string]: number };
+  stance_distribution: { [key: string]: { [key: string]: number } };
+  clickbait_distribution: { [key: string]: number };
+  publisher_isights?: string[];
+  sources_snapshot: { [key: string]: { [key: string]: string } };
+  stance: number;
+  article_count: number;
+  is_blind_spot: boolean;
+  blind_spot_side?: string;
+
+
+
+
+
 }

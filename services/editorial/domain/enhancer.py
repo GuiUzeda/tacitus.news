@@ -76,11 +76,8 @@ class NewsEnhancerDomain:
                     articles_to_mark_integrated.append(article)
                     
                     # Update Aggregates incrementally
-                    EventAggregator.aggregate_interests(event, article.interests)
-                    EventAggregator.aggregate_main_topics(event, article.main_topics)
                     EventAggregator.aggregate_stance(event, article.newspaper.bias, article.stance or 0.0)
                     EventAggregator.aggregate_clickbait(event, article.newspaper.bias, article.clickbait_score or 0.0)
-                    EventAggregator.aggregate_basic_stats(event, article)
 
 
         # --- PHASE 2: Debounce & Context ---
@@ -230,18 +227,38 @@ class NewsEnhancerDomain:
 
         # 2. PHASE 2: Aggregation
         # Reset aggregates before rebuilding
+        event.article_count = 0
+        event.editorial_score = 0.0
         event.interest_counts = {}
         event.main_topic_counts = {}
+        event.article_counts_by_bias = {}
+        event.sources_snapshot = {}
+        event.ownership_stats = {}
+        event.bias_distribution = {}
+        event.stance_distribution = {}
+        event.clickbait_distribution = {}
+        event.first_article_date = None
+        event.last_article_date = None
+        event.stance = 0.0
+
         summary_inputs = []
         for art in event.articles:
             EventAggregator.aggregate_basic_stats(event, art) 
             EventAggregator.aggregate_interests(event, art.interests)
             EventAggregator.aggregate_main_topics(event, art.main_topics)
+            EventAggregator.aggregate_metadata(event, art)
+            EventAggregator.aggregate_bias_counts(event, art)
+            EventAggregator.aggregate_source_snapshot(event, art)
+
             if art.key_points and art.newspaper:
                 summary_inputs.append({
                     "bias": art.newspaper.bias or "center",
                     "key_points": art.key_points
                 })
+            
+            if art.newspaper:
+                EventAggregator.aggregate_stance(event, art.newspaper.bias, art.stance or 0.0)
+                EventAggregator.aggregate_clickbait(event, art.newspaper.bias, art.clickbait_score or 0.0)
         
         session.add(event)
         if commit:

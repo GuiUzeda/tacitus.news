@@ -111,13 +111,6 @@ class NewsCluster:
         self._trigger_event_enhancement(session, new_event_id)
         return new_event_id
 
-    def _calculate_editorial_score(self, current_score: float, rank: Optional[int]) -> float:
-        if not rank:
-            return current_score
-        # Rank 1 = 10pts, Rank 2 = 9pts ... Rank 10+ = 1pt
-        points = max(11 - rank, 1)
-        return current_score + float(points)
-
     # --- MÉTODO DE FUSÃO CENTRALIZADO E SEGURO ---
     def execute_event_merge(
         self,
@@ -142,38 +135,7 @@ class NewsCluster:
             target_event.articles.append(art)
         
         # 2. HERANÇA DE DADOS (Critical Step)
-        
-        # A. Datas (Expandir a linha do tempo)
-        if source_event.first_article_date:
-            if not target_event.first_article_date or source_event.first_article_date < target_event.first_article_date:
-                target_event.first_article_date = source_event.first_article_date
-        
-        if source_event.last_article_date:
-            if not target_event.last_article_date or source_event.last_article_date > target_event.last_article_date:
-                target_event.last_article_date = source_event.last_article_date
-
-        # B. Scores (Soma)
-        target_event.editorial_score = (target_event.editorial_score or 0.0) + (source_event.editorial_score or 0.0)
-        target_event.article_count += source_event.article_count
-        
-        # C. Rank (Melhor rank vence)
-        if source_event.best_source_rank:
-            if target_event.best_source_rank is None or source_event.best_source_rank < target_event.best_source_rank:
-                target_event.best_source_rank = source_event.best_source_rank
-
-        # D. Viés / Spectrum (Merge de Dicionários)
-        if source_event.article_counts_by_bias:
-            target_counts = dict(target_event.article_counts_by_bias or {})
-            for bias, count in source_event.article_counts_by_bias.items():
-                target_counts[bias] = target_counts.get(bias, 0) + count
-            target_event.article_counts_by_bias = target_counts
-
-        # E. Main Topics (Merge)
-        if source_event.main_topic_counts:
-            target_topics = dict(target_event.main_topic_counts or {})
-            for topic, count in source_event.main_topic_counts.items():
-                target_topics[topic] = target_topics.get(topic, 0) + count
-            target_event.main_topic_counts = target_topics
+        EventAggregator.merge_event_stats(target_event, source_event)
 
         # 3. Tombstone (Enterrar o Source)
         source_event.is_active = False
@@ -557,26 +519,10 @@ class NewsCluster:
             .with_for_update()
         )
         session.refresh(event)
-        if not event.first_article_date or article.published_date < event.first_article_date:
-            event.first_article_date = article.published_date
-        
-        if not event.last_article_date or article.published_date > event.last_article_date:
-            event.last_article_date = article.published_date
 
-        # 2. Agregar Score Editorial e Rank
-        if article.source_rank:
-            # Melhor Rank Vence (Menor é melhor)
-            if event.best_source_rank is None or article.source_rank < event.best_source_rank:
-                event.best_source_rank = article.source_rank
-            
-            # Acumula pontos
-            event.editorial_score = self._calculate_editorial_score(
-                event.editorial_score, article.source_rank
-            )   
         # --- AGGREGATION PIPELINE (Updated) ---
         
         # 1. Basic Stats (Counts + Dates + Rank Score)
-        # This handles article_count+=1 and the hot_score logic
         EventAggregator.aggregate_basic_stats(event, article)
         
         # 2. Centroids
@@ -586,6 +532,8 @@ class NewsCluster:
         EventAggregator.aggregate_interests(event, article.interests)
         EventAggregator.aggregate_main_topics(event, article.main_topics)
         EventAggregator.aggregate_metadata(event, article)
+        EventAggregator.aggregate_bias_counts(event, article)
+        EventAggregator.aggregate_source_snapshot(event, article)
         
         # 4. Local Search Optimization (Black Hole Fix)
         # Pruning: Keep only the last 50 unique words to prevent keyword soup
@@ -596,14 +544,7 @@ class NewsCluster:
         
         event.last_updated_at = datetime.now(timezone.utc)
 
-        # 5. Helper for Bias Distribution (Specific to Clustering logic)
-        if article.newspaper and article.newspaper.bias:
-            bias = article.newspaper.bias
-            counts = dict(event.article_counts_by_bias or {})
-            counts[bias] = counts.get(bias, 0) + 1
-            event.article_counts_by_bias = counts
-
-        # 6. Link in DB
+        # 5. Link in DB
         article.event_id = event.id
         event.articles.append(article)
         

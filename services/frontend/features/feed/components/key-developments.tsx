@@ -1,9 +1,9 @@
 import React from "react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { cn , getBiasColor} from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { FeedEvent } from "../types";
-
+import { getBiasColor } from "@/lib/utils";
 
 export const KeyDevelopments = ({ events }: { events: FeedEvent[] }) => {
   return (
