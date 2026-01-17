@@ -160,6 +160,7 @@ class NewsEventModel(BaseModel):
     # Optional: Categorical classification for weighting!
     # e.g., "POLITICS", "ENTERTAINMENT", "SCIENCE", "CRIME"
     category_tag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    is_international: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     publisher_isights: Mapped[Optional[list[str]]] = mapped_column(
         ARRAY(Text), nullable=True
     )

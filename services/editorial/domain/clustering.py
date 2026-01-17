@@ -559,7 +559,16 @@ class NewsCluster:
         init_counts = {}
         init_ownership = {}
         init_main_topics = {}
-
+        init_snapshot = {}
+        if article.newspaper:
+            # Replicate the logic from EventAggregator.aggregate_source_snapshot
+            init_snapshot[article.newspaper.name] = {
+                "icon": article.newspaper.icon_url,
+                "name": article.newspaper.name,
+                "id": str(article.newspaper.id),
+                "logo": article.newspaper.logo_url,
+                "bias": article.newspaper.bias
+            }
         if article.interests:
             for category, items in article.interests.items():
                 init_interests[category] = {}
@@ -596,12 +605,14 @@ class NewsCluster:
             last_updated_at=datetime.now(timezone.utc),
             search_text=f"{article.title} {self.derive_search_query(article)}",
             
+            
             # Aggregations
             interest_counts=init_interests,
             main_topic_counts=init_main_topics,
             article_counts_by_bias=init_counts,
             bias_distribution=init_bias,
             ownership_stats=init_ownership,
+            sources_snapshot=init_snapshot,
             
             # Rank & Score
             best_source_rank=init_rank,

@@ -98,7 +98,7 @@ class NewsEnhancerDomain:
         if event.summary and (now - last_sum) < timedelta(minutes=self.DEBOUNCE_MINUTES):
              should_skip_synthesis = True
 
-        # Check for Merged Context (The Merger might have dumped info here)
+        # Check for Merged Context
         if has_external_update and not should_skip_synthesis:
             stmt_merges = select(NewsEventModel).where(
                 NewsEventModel.merged_into_id == event.id,
@@ -141,7 +141,9 @@ class NewsEnhancerDomain:
                     event.last_summarized_at = datetime.now(timezone.utc)
                     event.ai_impact_score = event_summary.impact_score
                     event.ai_impact_reasoning = event_summary.impact_reasoning
-                    event.category_tag = event_summary.category
+                    event.category_tag = event_summary.primary_category
+                    event.is_international = event_summary.is_international
+                    event.publisher_isights = event_summary.secondary_topics
                     session.add(event)
             else:
                 logger.info(f"⏳ Debounced: Skipping LLM for {event.title} (Wait for next cycle)")
@@ -271,7 +273,6 @@ class NewsEnhancerDomain:
             session.flush()
         
         if not summary_inputs:
-            # event.is_active = False Maintain the event active
             event.status = EventStatus.ARCHIVED
             session.add(event)
             if commit: session.commit()
@@ -282,7 +283,6 @@ class NewsEnhancerDomain:
         try:
             event_summary = await self.enhancer.summarize_event(summary_inputs, previous_summary=None)
             if not event_summary:
-                # event.is_active = False Maintain the event active
                 event.status = EventStatus.ARCHIVED
                 session.add(event)
                 if commit: session.commit()
@@ -295,8 +295,16 @@ class NewsEnhancerDomain:
             event.summary = event_summary.summary
             event.ai_impact_score = event_summary.impact_score
             event.ai_impact_reasoning = event_summary.impact_reasoning
+            event.category_tag = event_summary.primary_category
+            event.is_international = event_summary.is_international
+            event.publisher_isights = event_summary.secondary_topics
             event.last_summarized_at = datetime.now(timezone.utc)
-            event.status = EventStatus.ENHANCED 
+            
+            # --- CRITICAL FIX: Status Protection ---
+            # If event is already PUBLISHED or ARCHIVED, keep it that way.
+            # Only promote to ENHANCED if it's currently DRAFT (or implicitly MERGED/Unknown).
+            if event.status not in (EventStatus.PUBLISHED, EventStatus.ARCHIVED):
+                event.status = EventStatus.ENHANCED 
             
             session.add(event)
             if commit:

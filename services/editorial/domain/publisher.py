@@ -21,10 +21,10 @@ class NewsPublisherDomain:
 
         # --- CONFIGURATION (EQUILIBRADA) ---
         self.WEIGHT_EDITORIAL_LOG_FACTOR = 40.0
-        self.WEIGHT_VOLUME_LOG_FACTOR = 10.0
+        self.WEIGHT_VOLUME_LOG_FACTOR = 300.0
 
-        self.RECENCY_MAX_BONUS = 180.0
-        self.RECENCY_HALFLIFE_HOURS = 24.0
+        self.RECENCY_MAX_BONUS=150.0
+        self.RECENCY_HALFLIFE_HOURS = 6.0
 
         # Collision Thresholds
         self.COLLISION_THRESHOLD_STRICT = 0.05
@@ -295,7 +295,13 @@ class NewsPublisherDomain:
             score *= best_multiplier
 
         impact = event.ai_impact_score or 10
-
+        if event.is_international:
+            # Check impact to decide penalty
+            impact = event.ai_impact_score or 0
+            if impact < 70:
+                score *= 0.85  # Dampen routine international news
+            else:
+                score *= 1.0   # Keep major global events full strength
         # FIX 2: Steeper Impact Curve
         # Old: 0.4 + (impact/100 * 1.6) -> Range [0.4 ... 2.0]
         # New:
@@ -315,6 +321,22 @@ class NewsPublisherDomain:
             semantic_multiplier = 0.8 + ((impact - 50.0) / 50.0) * 2.2  # Max 3.0
 
         score *= semantic_multiplier
+
+        # ---------------------------------------------------------
+        # 🆕 NEW LOGIC: GLOBAL TIME GRAVITY
+        # ---------------------------------------------------------
+        # This ensures that even "Mega Events" eventually yield to new stories.
+        # After 12 hours, the TOTAL score starts shrinking by 5% every hour.
+
+        # Gravity kicks in after 6 hours
+        if age_hours > 6.0:
+            # Formula: Decay factor that gets stronger with time
+            # At 6h: 1.0 (No penalty)
+            # At 12h: 0.85 (15% penalty)
+            # At 24h: 0.50 (50% penalty)
+            time_decay = 1.0 / (1.0 + 0.05 * (age_hours - 6.0)**1.5)
+            score *= time_decay
+        
 
         # Clickbait Penalty
         if event.clickbait_distribution:
@@ -390,7 +412,7 @@ class NewsPublisherDomain:
                 insights.append("BLIND_SPOT")
         
         elif sides_count == 1:
-                score *= 0.8
+                score *= 0.5
                 insights.append("NICHE")
 
         return round(score, 2), insights, {"bias_counts": bias_counts}

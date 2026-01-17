@@ -15,9 +15,9 @@ export const getBiasColor = (bias: { left: number; right: number } | undefined) 
 };
 
 export const getImpactColor = (score: number) => {
-  if (score > 80) return "text-red-600 border-red-600 shadow-[0_0_15px_rgba(220,38,38,0.3)]";
-  if (score >= 50) return "text-zinc-900 border-zinc-900";
-  return "text-zinc-400 border-zinc-300";
+  if (score > 75) return "text-red-600 border-red-600 bg-red-600  shadow-[0_0_15px_rgba(220,38,38,0.3)]";
+  if (score >= 50) return "text-zinc-500 border-zinc-500 bg-zinc-500";
+  return "text-zinc-400 border-zinc-300 bg-zinc-300";
 };
 
 // conver since last update in seconds to days or hours in pt-br

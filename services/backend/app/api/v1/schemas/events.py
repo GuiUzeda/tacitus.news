@@ -42,6 +42,8 @@ class NewsEventListSchema(BaseModel):
     title: str
     subtitle: Optional[str] = None
     category_tag: Optional[str] = Field(default="GENERAL")
+    created_at: datetime
+    last_article_date: Optional[datetime] = Field(default_factory=datetime.now)
     last_updated_at: datetime
     ai_impact_score: Optional[int] = Field(default=0)
     article_count: Optional[int] = Field(default=0)
@@ -55,6 +57,9 @@ class NewsEventListSchema(BaseModel):
     stance: float = Field(default=0.0)
     is_blind_spot: Optional[bool] = Field(default=False)
     blind_spot_side: Optional[str] = None
+    is_international: bool
+    main_topic_counts: Optional[Dict[str, int]] = Field(default_factory=dict)
+
 
 
     model_config = ConfigDict(from_attributes=True)

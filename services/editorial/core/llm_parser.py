@@ -3,6 +3,7 @@ import os
 import json
 import re
 import asyncio
+from enum import Enum
 from functools import wraps
 from unittest.mock import Base
 import fast_json_repair
@@ -14,6 +15,7 @@ from pydantic import BaseModel, ValidationError, field_validator, Field
 import random
 import litellm
 import warnings
+from bs4 import BeautifulSoup
 
 # Initialize Client
 from config import Settings
@@ -112,6 +114,10 @@ class LLMRouter:
 
         # 1. Define Model Tiers (Priority: Cheap -> Reliable -> Smart)
         self.model_fallbacks = {
+            "child": [
+                "gemini/gemma-3-2b-it", 
+              "gemini/gemma-3-1b-it",  
+            ],
             "intern": [
                 "gemini/gemma-3-4b-it",
                 "groq/llama-3.1-8b-instant",
@@ -311,10 +317,23 @@ class LLMRouter:
 # --- Pydantic Schemas ---
 
 
+class CategoryEnum(str, Enum):
+    # The "Big 5" for UI Badges
+    POLITICS = "Politics"
+    ECONOMY = "Economy" 
+    WORLD = "World" # Use only if no other fit or purely geopolitical
+    SOCIETY = "Society" # Includes Crime, Health, Education
+    TECH_SCIENCE = "Tech & Science"
+    ENTERTAINMENT = "Entertainment"
+    SPORTS = "Sports"
+    HEALTH= "Health"
+    CRIME = "Crime"
+    OTHER = "Other"
+
 class LLMNewsOutputSchema(BaseModel):
     status: Literal["valid", "error", "irrelevant"] = "valid"
     error_message: Optional[str] = None
-    summary: str | None = ""
+    summary:str|None = ""
     key_points: List[str] = []
     stance: float | None = 0.0
     stance_reasoning: str | None = ""
@@ -371,13 +390,45 @@ class BatchMatchResponse(BaseModel):
     results: List[BatchMatchResult]
 
 
-class LLMSummaryResponse(BaseModel):
-    title: str
-    subtitle: Optional[str] = None
-    category: str
-    impact_reasoning: str
-    impact_score: int
-    summary: Dict[str, Any]  # Can contain 'left', 'right', 'center', 'bias'
+class EventSummaryOutput(BaseModel):
+    """
+    Structured output for the Event Enhancer (summarization phase).
+    """
+    title: str = Field(..., description="A neutral, Swiss-style headline (Max 80 chars). No clickbait.")
+    subtitle: str = Field(..., description="A single sentence expanding on the lead.")
+    
+    # The Summary Object (Structured for UI)
+    summary: Dict[str, str|list] = Field(..., )
+
+    # --- NEW: SCOPE & TAXONOMY ---
+    is_international: bool = Field(..., description="TRUE if the event happens outside Brazil and is NOT primarily about Brazilian foreign policy. FALSE if it is local/national.")
+    
+    primary_category: CategoryEnum = Field(..., description="The single most dominant vertical for the UI Badge.")
+    
+    secondary_topics: List[str] = Field(default_factory=list, description="Up to 5 specific tags. E.g. ['Corruption', 'Public Security', 'Inflation', 'Trade War']")
+    
+    # --- SCORING ---
+    impact_score: int = Field(..., description="0-100 score of relevance to a Brazilian audience.")
+    impact_reasoning: str = Field(..., description="Brief justification for the score.")
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def parse_summary(cls, v):
+        if isinstance(v, dict):
+            return {
+                k: ("\n".join(val) if isinstance(val, list) else val)
+                for k, val in v.items()
+            }
+        return v
+
+    @field_validator("primary_category", mode="before")
+    @classmethod
+    def parse_category(cls, v):
+        if isinstance(v, str):
+            for member in CategoryEnum:
+                if member.value.lower() == v.lower():
+                    return member
+        return v
 
 
 class FilterResponse(BaseModel):
@@ -486,7 +537,107 @@ class CloudNewsAnalyzer:
         # Ensure we don't overlap if limit is weirdly small vs text length,
         # though the strict check above handles mostly.
         return f"{text[:head_len]}\n\n[...TRUNCATED SECTIONS...]\n\n{text[-tail_len:]}"
+    
+    def _filter_date_relevant_html(self, html: str) -> str:
+        """
+        Extracts only tags that might contain date information to save tokens.
+        """
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception as e:
+            logger.warning(f"BS4 parsing failed: {e}")
+            return html[:6000]
 
+        candidates = []
+        
+        # Keywords (Portuguese & English)
+        keywords = [
+            "date", "time", "published", "updated", "modified", "clock", 
+            "data", "hora", "publi", "atualiz", "criado", "em:",
+            "timestamp", "calendar", "post", "entry", "schedule", "agend",
+            "lastmod", "meta", "author", "byline", "info", "archive"
+        ]
+
+        # 1. <meta> tags (High Signal)
+        for meta in soup.find_all("meta"):
+            attrs_str = str(meta.attrs).lower()
+            if any(k in attrs_str for k in keywords):
+                candidates.append(str(meta))
+
+        # 2. <time> tags
+        for time in soup.find_all("time"):
+            candidates.append(str(time))
+            
+        # 3. JSON-LD
+        for script in soup.find_all("script", type="application/ld+json"):
+            if "date" in script.text.lower():
+                candidates.append(str(script))
+
+        # 4. Heuristic Search in common containers
+        # We look for small blocks of text containing date keywords
+        for tag in soup.find_all(["div", "span", "p", "li", "small"]):
+            # Check attributes
+            attrs_str = str(tag.attrs).lower()
+            attr_match = any(k in attrs_str for k in keywords)
+            
+            # Check text content (must be short to be a date line)
+            text = tag.get_text(" ", strip=True).lower()
+            text_match = len(text) < 200 and any(k in text for k in ["publicado", "atualizado", "posted", "updated", "em:", "/202", "/201", "criado", "modificado", "date", "time"])
+            
+            if (attr_match or text_match) and len(str(tag)) < 1000:
+                candidates.append(str(tag))
+
+        return "\n".join(candidates)
+
+    @with_retry(max_retries=30, base_delay=30)
+    async def extract_date_from_html(self, html_snippet: str) -> str | None:
+        """
+        Uses a small model (Intern Tier) to simply find the date in a messy HTML block.
+        Cheaper and smarter than complex Regex for weird formats.
+        """
+        # 1. Filter HTML to reduce noise using BS4
+        clean_html = self._filter_date_relevant_html(html_snippet)
+        
+        # Fallback if filtering returned nothing (unlikely but possible)
+        if not clean_html:
+             clean_html = html_snippet[:6000]
+
+        prompt = f"""
+        Task: Identify the publication date of the news article in this HTML snippet.
+        
+        Input HTML:
+        {clean_html}
+        
+        Instructions:
+        1. Look for 'datePublished', 'time', 'Publicado em', 'Updated', or 'dateline'.
+        2. Return **ONLY** the date and time found.
+        3. Format as 'YYYY-MM-DD HH:mm' if possible.
+        4. If NOT found, return exactly: "null".
+        
+        ANSWER ONLY THE FOUND DATE AND TIME. NO EXTRA TEXT
+        
+        Answer:
+        """
+
+        try:
+            # Use 'intern' tier (Gemma 4B or Llama 8B) - 1B might hallucinate on raw HTML tags
+            result = await self.router.generate(
+                model_tier="intern", 
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                json_mode=False # We just want a string
+            )
+            
+            clean_result = result.strip().replace('"', '').replace("'", "")
+            if "null" in clean_result.lower():
+                return None
+                
+            return clean_result
+
+        except Exception as e:
+            logger.warning(f"Date extraction failed: {e}")
+            return None
+        
     async def analyze_articles_batch(
         self, texts: List[str]
     ) -> List[LLMNewsOutputSchema]:
@@ -829,14 +980,14 @@ class CloudNewsAnalyzer:
 
     @with_retry(max_retries=5, base_delay=60)
     async def summarize_event(
-        self, article_summaries: list[dict], previous_summary: Optional[dict]
-    ) -> LLMSummaryResponse | None:
+        self, inputs: List[Dict], previous_summary: Optional[Dict] = None
+    ) -> EventSummaryOutput | None:
         """
-        Takes a list of article summaries (grouped by bias) and generates
-        the "Ground News" style comparison.
+        Synthesizes multiple article perspectives into a single event object.
         """
+        # 1. Construct Context
         context_str = ""
-        for item in article_summaries:
+        for item in inputs:
             context_str += f"[{item['bias'].upper()} SOURCE]: {item['key_points']}\n"
 
         prev_summary_str = (
@@ -859,23 +1010,23 @@ class CloudNewsAnalyzer:
         **IMPACT SCORING RUBRIC (0-100) - BE STRICT:**
         You must distinguish between "Local Noise/Entertainment" and "National/Global Signals".
         
-        * **SCOPE: IRRELEVANT (Score 0-15)**
+        * **SCOPE: IRRELEVANT (Score 0-15)** - No impact on life
             * **Reality Shows:** BBB (Big Brother Brasil), A Fazenda, RuPaul, etc.
             * **Celebrity Gossip:** Dating, breakups, outfits, minor health issues of famous people.
             * **Viral Nonsense:** Internet memes without political context.
             * **Routine Sports:** Match results, player transfers (unless massive corruption).
             * **Curiosities and life hacks/tips:** "How to save money", "Best travel destinations", "Healthy recipes", nice to now news but not relevant.
             
-        * **SCOPE: LOCAL (Score 16-40)**
+        * **SCOPE: LOCAL (Score 16-40)** - Low impact on life
             * **Municipal/Hyper-Local:** "Bus line changes", "Street paved", "Store opening".
             * "Local crime with no political link".
             * "Weather forecast for the weekend".
             
-        * **SCOPE: STATE/ROUTINE (Score 41-65)**
+        * **SCOPE: STATE/ROUTINE (Score 41-65)** - Medium impact on life
             * **41-55 (Routine):** Standard daily politics (statements, meetings), Monthly economic stats (if stable).
             * **56-65 (State Level):** State governor actions, large infrastructure works, major police operations involving gangs.
 
-        * **SCOPE: NATIONAL/CRITICAL (Score 66-100)**
+        * **SCOPE: NATIONAL/CRITICAL (Score 66-100)** - High impact on life
             * **66-79 (Significant):** New Federal Laws passed, Major Corruption Scandals (Lava Jato level), Large fluctuation in Dollar/Stock Market.
             * **80-89 (High Impact):** Arrest of high officials (Ministers, Ex-Presidents), Constitutional Crisis, Natural Disasters with mass casualties.
             * **90-100 (Historic):** Coup d'état, War Declaration, Pandemic, Assassination of Head of State.
@@ -897,9 +1048,11 @@ class CloudNewsAnalyzer:
         {{
             "title": "Direct, active-voice headline.",
             "subtitle": "Contextual explanation.",
-            "category": "One of: POLITICS, ECONOMY, WORLD, TECH, SCIENCE, HEALTH, ENTERTAINMENT, SPORTS, CRIME, OTHER",
+            "primary_category": "One of: 'Politics', 'Economy', 'World', 'Society', 'Tech & Science', 'Entertainment', 'Sports', 'Health', 'Crime' or 'Other'",
             "impact_reasoning": "State the SCOPE (Local/National) and WHY you chose this score.",
             "impact_score": 50,
+            "secondary_topics": ["Corruption", "Public Security", "Inflation", "Trade War",...] \\ Up to 5 specific tags.
+            "is_international": false, \\ TRUE if the event happens outside Brazil and is NOT primarily about Brazilian foreign policy. FALSE if it is local/national
             "summary": {{
                 "left": "Markdown bullet points... OR \"\"",
                 "right": "Markdown bullet points... OR \"\"",
@@ -911,13 +1064,14 @@ class CloudNewsAnalyzer:
         Answer ONLY the VALID JSON.
         """
 
+
         response = None
         try:
             result = await self.router.generate(
                 model_tier="senior",
                 messages=[{"role": "user", "content": prompt}],
-                response_model=LLMSummaryResponse,
-                temperature=0.2,
+                response_model=EventSummaryOutput,
+                temperature=0.1,
                 json_mode=True,
             )
             return result
@@ -978,7 +1132,7 @@ class CloudNewsAnalyzer:
         Answer ONLY the VALID JSON.
         """
 
-        response = None
+
         try:
             result = await self.router.generate(
                 model_tier="senior",

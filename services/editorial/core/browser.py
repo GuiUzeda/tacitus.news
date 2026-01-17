@@ -29,7 +29,7 @@ class BrowserFetcher:
         logger.info(f"🎭 Browser Fetching: {url} (Scrolls: {scroll_depth})")
         
         async with async_playwright() as p:
-            for browser_name in ["chromium", "firefox"]:
+            for browser_name in ["firefox","chromium"]:
                 try:
                     browser_type = getattr(p, browser_name)
                     # Chromium needs sandbox flags in Docker
@@ -63,7 +63,7 @@ class BrowserFetcher:
                             else route.continue_()
                         )
 
-                        response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                        response = await page.goto(url, timeout=600, wait_until="domcontentloaded")
                         await page.wait_for_timeout(2000) # Settle time
 
                         # Close potential popups/overlays

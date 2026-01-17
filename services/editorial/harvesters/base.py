@@ -368,7 +368,7 @@ class BaseHarvester:
 
             # 2. Date Check (Google News Sitemap)
             news = u.find("news:news")
-            lastmod = u.find("lastmod")
+
             pub_date = None
             if news:
                 pdate = news.find("news:publication_date")
@@ -382,7 +382,7 @@ class BaseHarvester:
                 "title": "Unknown", # Sitemaps rarely have titles
                 "link": link,
                 "source": base_domain,
-                "published": pub_date or (lastmod.text if lastmod else None),
+                "published": pub_date,
                 "content": "Unknown",
                 "rank": None, # Sitemaps have no editorial rank
                 "hash": url_hash

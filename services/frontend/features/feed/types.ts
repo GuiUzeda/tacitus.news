@@ -7,14 +7,20 @@ export interface FeedEvent {
   impact: number;
   sources: { [key: string]: { [key: string]: string } };
   clickbait: number;
-  biasDistribution: { left: number; center: number; right: number};
+  biasDistribution: { left: number; center: number; right: number };
   isBlindspot?: boolean;
   subtitle?: string;
   sinceLastUpdate: number;
   stanceDistribution: { left: number; center: number; right: number; }
   articles: number;
   blindSpotSide?: string;
-  
+  isInternational: boolean;
+  createdAt: string;
+  lastArticleDate: string;
+  mainTopics: string[];
+
+
+
 }
 
 export interface NewsEvent {
@@ -33,9 +39,8 @@ export interface NewsEvent {
   article_count: number;
   is_blind_spot: boolean;
   blind_spot_side?: string;
-
-
-
-
-
+  is_internationa: boolean;
+  created_at: string;
+  last_article_date: string;
+  main_topic_counts: { [key: string]: number }
 }
