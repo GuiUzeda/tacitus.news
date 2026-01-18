@@ -1,5 +1,8 @@
 import sys
 import os
+from typing import List
+
+import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
@@ -11,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, Session
 
 # Existing Domains
 from domain.clustering import NewsCluster
-from domain.enhancer import NewsEnhancerDomain
+from domain.enhancing import NewsEnhancerDomain
 from domain.publisher import NewsPublisherDomain
 from domain.aggregator import EventAggregator
 from news_events_lib.models import (
@@ -22,7 +25,8 @@ from news_events_lib.models import (
     JobStatus
 )
 from core.models import EventsQueueModel, ArticlesQueueModel
-
+from sklearn.cluster import DBSCAN
+from sklearn.metrics.pairwise import cosine_distances
 class GardnerService:
     def __init__(self):
         self.cluster_domain = NewsCluster()
@@ -33,7 +37,127 @@ class GardnerService:
         self.SPLIT_THRESHOLD_COUNT = 30 
         self.SPLIT_THRESHOLD_HOURS = 24
         self.CHECK_SPLIT_DAYS = 5
+    def calculate_sub_clusters(
+        self, 
+        session: Session, 
+        event: NewsEventModel,
+        eps: float = 0.22, 
+        min_samples: int = 2
+    ) -> List[List[ArticleModel]]:
+        """
+        Analyzes an event's articles and splits them into cohesive sub-groups 
+        using DBSCAN on a custom (Semantic + Temporal) distance matrix.
+        """
+        # 1. Fetch Data
+        # We need all articles with their embeddings
+        articles = session.scalars(
+            select(ArticleModel)
+            .where(ArticleModel.event_id == event.id)
+            .order_by(ArticleModel.published_date)
+        ).all()
 
+        if len(articles) < 3:
+            return []  # Too small to split
+
+        # 2. Prepare Vectors & Timestamps
+        valid_articles = []
+        vectors = []
+        timestamps = []
+        
+        for art in articles:
+            if art.embedding is not None and len(art.embedding) == 768: # Ensure valid vector
+                valid_articles.append(art)
+                vectors.append(art.embedding)
+                
+                # Normalize time to "Hours since first article"
+                dt = art.published_date
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+                timestamps.append(dt.timestamp() / 3600.0) # Hours
+
+        if not valid_articles:
+            return []
+
+        # Convert to Numpy
+        X_vec = np.array(vectors)
+        # FIX: Keep shape as (N, 1)
+        X_time = np.array(timestamps).reshape(-1, 1) 
+        
+        # 3. Compute Distance Matrix
+        # A. Semantic Distance (0.0 to 1.0+)
+        dist_semantic = cosine_distances(X_vec)
+
+        # B. Temporal Distance (FIXED BROADCASTING)
+        # We perform (N, 1) - (1, N) to get (N, N) matrix
+        t_diff = np.abs(X_time - X_time.T) 
+        
+        # Scale: 24h gap adds 0.15 distance
+        dist_time = (t_diff / 24.0) * 0.15
+
+        # C. Combined Distance
+        # Shape is now safely (N, N)
+        dist_final = dist_semantic + dist_time
+
+        # 4. Run DBSCAN
+        # eps=0.22 -> Cluster Radius. 
+        # min_samples=2 -> Even a pair can form a cluster.
+        db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed')
+        labels = db.fit_predict(dist_final)
+
+        # 5. Group Results
+        clusters = {}
+        noise = []
+
+        for idx, label in enumerate(labels):
+            art = valid_articles[idx]
+            if label == -1:
+                noise.append(idx)
+            else:
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(art)
+
+        # 6. Handle Noise (The "Smart Orphan" Logic)
+        # Threshold: 0.25 (Same as your Loose Collision/Proposal threshold)
+        NOISE_MERGE_THRESHOLD = 0.25 
+        
+        if clusters and noise:
+            for noise_idx in noise:
+                min_dist = 999.0
+                best_cluster = None
+                
+                # Compare noise item against valid cluster members
+                for label, cluster_arts in clusters.items():
+                    # Heuristic: Compare against the first member (Representative)
+                    # Ideally, compare against all and take average, but this is fast.
+                    member_idx = valid_articles.index(cluster_arts[0]) 
+                    d = dist_final[noise_idx][member_idx]
+                    
+                    if d < min_dist:
+                        min_dist = d
+                        best_cluster = label
+                
+                # --- LOGIC CHANGE HERE ---
+                if best_cluster is not None and min_dist <= NOISE_MERGE_THRESHOLD:
+                    # It's close enough, just an outlier. Pull it in.
+                    clusters[best_cluster].append(valid_articles[noise_idx])
+                else:
+                    # It is TOO FAR. Orphan it.
+                    # We create a new unique label for this orphan
+                    new_orphan_label = 1000 + noise_idx
+                    clusters[new_orphan_label] = [valid_articles[noise_idx]]
+                    logger.info(f"✂️ Orphaned noise article: '{valid_articles[noise_idx].title[:20]}' (Dist {min_dist:.2f} > {NOISE_MERGE_THRESHOLD})")
+
+        # 7. Format Output
+        result_groups = list(clusters.values())
+        
+        # Note: We allow groups of size 1 (orphans) to be returned now.
+        if not result_groups:
+             return []
+
+        # Sort groups by time (Oldest event first)
+        result_groups.sort(key=lambda arts: min(a.published_date for a in arts))
+
+        return result_groups
     async def run_cycle(self, session):
         logger.info("🌿 Gardner Cycle Started...")
         
@@ -64,7 +188,11 @@ class GardnerService:
         ).all()
 
         for parent_event in candidates:
-            await self._process_split(session, parent_event)
+            try:
+                await self._process_split(session, parent_event)
+            except Exception as e:
+                logger.error(f"Failed to split event {parent_event.id}: {e}")
+                session.rollback()
 
     async def _run_score_decay(self, session):
         logger.info("📉 Running Score Decay...")
@@ -96,8 +224,8 @@ class GardnerService:
                             
                 updated_count += 1
         
-        session.commit()
         if updated_count > 0:
+            session.commit()
             logger.info(f"   -> Updated scores for {updated_count} events.")
 
     async def _run_archivist(self, session):
@@ -150,8 +278,8 @@ class GardnerService:
             )
         )
         
-        session.commit()
         if res_art.rowcount > 0 or res_evt.rowcount > 0:
+            session.commit()
             logger.info(f"   -> Deleted {res_art.rowcount} article jobs and {res_evt.rowcount} event jobs.")
 
     async def _process_split(self, session: Session, parent_event):
@@ -159,7 +287,7 @@ class GardnerService:
         eps = min(0.3*50/max(parent_event.article_count,1), 0.7)
         
         # 1. CLUSTER ANALYSIS
-        sub_clusters = self.cluster_domain.calculate_sub_clusters(
+        sub_clusters = self.calculate_sub_clusters(
             session, parent_event, eps=eps
         )
         
@@ -189,14 +317,14 @@ class GardnerService:
             new_event = session.get(NewsEventModel, new_event_id)
             
             for art in group[1:]:
-                self.cluster_domain._link_to_event(session, new_event, art, art.embedding)
+                self.cluster_domain.link_article_to_event(session, new_event, art, art.embedding)
             
             session.refresh(new_event)
             new_events.append(new_event)
 
         # 4. PROCESS EJECTED EVENTS (Enhance & Publish - No Commit)
         for child_event in new_events:
-            await self.enhancer_domain.enhance_event_direct(session, child_event, commit=False)
+            await self.enhancer_domain.enhance_event_direct(session, child_event)
             self.publisher_domain.publish_event_direct(session, child_event, commit=False)
             logger.success(f"   -> Created Child: {child_event.title}")
 
@@ -223,7 +351,7 @@ class GardnerService:
             unique_words = list(dict.fromkeys(reversed(new_keywords)))[:50]
             parent_event.search_text = " ".join(reversed(unique_words))
 
-        await self.enhancer_domain.enhance_event_direct(session, parent_event, commit=False)
+        await self.enhancer_domain.enhance_event_direct(session, parent_event)
         self.publisher_domain.publish_event_direct(session, parent_event, commit=False)
 
         # 6. IMMUNITY: CREATE "ANTI-MERGE" PROPOSALS (The Loop Fix)

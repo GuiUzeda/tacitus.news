@@ -203,7 +203,11 @@ class ArticleModel(BaseModel):
     url_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     original_url: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
-    published_date: Mapped[datetime] = mapped_column(DateTime)
+    published_date: Mapped[datetime] = mapped_column(DateTime , nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    ) 
     summary_date: Mapped[datetime] = mapped_column(DateTime)
     summary_status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus), default=JobStatus.PENDING, index=True

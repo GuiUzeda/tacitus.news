@@ -22,7 +22,7 @@ class NewsFilterDomain:
         self.llm_filter = CloudNewsFilter()
 
     async def execute_batch_filtering(
-        self, session: Session, jobs: List[ArticlesQueueModel]
+        self,  jobs: List[ArticlesQueueModel]
     ) -> Tuple[int, int]:
         """
         Orchestrates the filtering process:

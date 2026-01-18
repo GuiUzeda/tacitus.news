@@ -3,6 +3,7 @@ import json
 import re
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+from types import NoneType
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime, timezone, timedelta
 
@@ -10,15 +11,14 @@ import aiohttp
 import trafilatura
 from loguru import logger
 from htmldate import find_date
-from sqlalchemy.orm import Session
 from bs4 import BeautifulSoup
 from dateutil import parser
 
 # Project Imports
 from core.nlp_service import NLPService
-from core.llm_parser import CloudNewsAnalyzer, LLMNewsOutputSchema
-from news_events_lib.models import ArticleModel, ArticleContentModel, JobStatus
-from core.models import ArticlesQueueModel, ArticlesQueueName
+from core.llm_parser import CloudNewsAnalyzer
+from news_events_lib.models import ArticleModel
+from core.models import ArticlesQueueModel
 from config import Settings
 from core.browser import BrowserFetcher
 
@@ -35,7 +35,7 @@ def init_worker():
         logger.error(f"Worker init failed: {e}")
 
 
-def extract_json_ld(soup):
+def _extract_json_ld(soup):
     scripts = soup.find_all("script", type="application/ld+json")
     for script in scripts:
         try:
@@ -97,9 +97,6 @@ def _extract_time(bs4_html: BeautifulSoup, date: datetime):
         )
 
         if time_match:
-            # Group 1 is the full time string (e.g. "14h30"), Group 2 is separator
-            # Wait! In "(\d{1,2}(:|h)\d{2})", group 1 is the full match, group 2 is ":" or "h"
-            # Your previous code used group(1), which is correct.
             raw_time = time_match.group(1).replace("h", ":")
 
             # Handle "9:30" -> "09:30"
@@ -133,7 +130,7 @@ async def _get_html(http_session, url: str) -> str:
 
 def _extract_published_date(soup: BeautifulSoup):
     published_date = None
-    ld_json = extract_json_ld(soup)
+    ld_json = _extract_json_ld(soup)
     if ld_json:
         try:
             date_published = ld_json.get("datePublished") or ld_json.get("dateCreated")
@@ -143,12 +140,12 @@ def _extract_published_date(soup: BeautifulSoup):
             dt_mod = None
 
             if date_published:
-                dt_pub = parser.parse(date_published)
+                dt_pub = parser.parse(date_published, dayfirst=True)
                 if dt_pub.tzinfo is None:
                     dt_pub = dt_pub.replace(tzinfo=timezone.utc)
 
             if date_updated:
-                dt_mod = parser.parse(date_updated)
+                dt_mod = parser.parse(date_updated, dayfirst=True)
                 if dt_mod.tzinfo is None:
                     dt_mod = dt_mod.replace(tzinfo=timezone.utc)
 
@@ -208,7 +205,7 @@ def _extract_published_date(soup: BeautifulSoup):
             try:
 
                 if date.tzinfo is None:
-                    date= date.replace(tzinfo=timezone.utc)
+                    date = date.replace(tzinfo=timezone.utc)
                 published_date = date
             except:
                 pass
@@ -236,6 +233,11 @@ def _cpu_extract_date_and_content(html: str, result) -> Dict:
 
     # --- STEP 4: AGE CHECK (Fail Fast) ---
     if result["published_date"]:
+        if result["published_date"].tzinfo is None:
+            result["published_date"] = result["published_date"].replace(
+                tzinfo=timezone.utc
+            )
+
         cutoff = datetime.now(timezone.utc) - timedelta(days=5)
         if result["published_date"] < cutoff:
             # STOP HERE: The article is too old.
@@ -265,7 +267,7 @@ def _cpu_extract_date_and_content(html: str, result) -> Dict:
         result["stop_reason"] = "Empty Content"
         return result
 
-    if not result["embedding"]:
+    if type(result["embedding"]) == NoneType or sum(result["embedding"]) == 0:
         clean_text = _worker_nlp_service.clean_text_for_embedding(result["content"])
         result["embedding"] = _worker_nlp_service.calculate_vector(clean_text)
 
@@ -275,13 +277,14 @@ def _cpu_extract_date_and_content(html: str, result) -> Dict:
 # --- MAIN SERVICE ---
 
 
-class EnrichingDomain:
+class ContentEnricherDomain:
     def __init__(self, max_cpu_workers=2, http_concurrency=10):
         self.settings = Settings()
         self.semaphore = asyncio.Semaphore(http_concurrency)
         self.cpu_executor = ProcessPoolExecutor(
             max_workers=max_cpu_workers, initializer=init_worker
         )
+        # LLM only used for date extraction fallback
         self.llm = CloudNewsAnalyzer()
         self.llm_semaphore = asyncio.Semaphore(5)
         self.max_cpu_workers = max_cpu_workers
@@ -314,45 +317,6 @@ class EnrichingDomain:
             ]
             return await asyncio.gather(*tasks)
 
-    # --- PHASE 2: LLM (Summarize Batch) ---
-    async def run_llm_enrichment(
-        self, valid_items: List[Tuple[ArticlesQueueModel, Dict]]
-    ):
-        """
-        Takes a list of pre-validated (Job, Result) tuples.
-        Runs the LLM on them in one massive efficient batch.
-        Updates the 'ResultDict' in-place with LLM data.
-        """
-        if not valid_items:
-            return
-
-        # 1. Prepare Inputs
-        llm_inputs = []
-        for job, res in valid_items:
-            # We use the extracted title if available, else DB title
-            title = res.get("title") or job.article.title
-            date = res.get("published_date")
-            content = res.get("content", "")[:15000]  # Cap context
-            llm_inputs.append(f"Title: {title}\nDate: {date}\nContent: {content}")
-
-        # 2. Call LLM
-        logger.info(
-            f"🧠 Optimized Batch: Running LLM on {len(llm_inputs)} valid articles..."
-        )
-        try:
-            outputs = await self.llm.analyze_articles_batch(llm_inputs)
-
-            # 3. Merge Results
-            for (job, res), output in zip(valid_items, outputs):
-                res["llm_output"] = output
-
-        except Exception as e:
-            logger.error(f"LLM Batch Failed: {e}")
-            # Mark all as failed so we don't lose them
-            for job, res in valid_items:
-                res["status"] = "failed"
-                res["stop_reason"] = f"LLM Batch Error: {str(e)[:50]}"
-
     def _check_for_blocking(self, html: str) -> Optional[str]:
         if not html:
             return None
@@ -373,19 +337,19 @@ class EnrichingDomain:
             result = {
                 "status": "success",
                 "published_date": article.published_date,
-                "content": article.contents[0] if article.contents else None,
+                "content": article.contents[0].content if article.contents else None,
                 "subtitle": article.subtitle,
                 "title": article.title,
                 "embedding": article.embedding,
                 "stop_reason": "Original",
             }
             if (
-                (not result["content"] or len(result["content"].content) < 100)
+                (not result["content"] or len(result["content"]) < 100)
                 or not result["published_date"]
                 or not result["title"]
                 or result["title"].lower() in ["unknwon", "no title"]
-                or not result["embedding"]
-                or sum(result["embedding"]) < 0
+                or type(result["embedding"]) == NoneType
+                or sum(result["embedding"]) == 0
             ):
                 html = await _get_html(http_session, article.original_url)
                 if not html or self._check_for_blocking(html):
@@ -400,6 +364,7 @@ class EnrichingDomain:
                 if result["status"] == "success" and not result["published_date"]:
                     try:
                         async with self.llm_semaphore:
+                            # Keep only the date extraction fallback
                             llm_date_str = await self.llm.extract_date_from_html(
                                 html[:5000]
                             )
@@ -426,9 +391,8 @@ class EnrichingDomain:
                 return job, result
 
             if (
-                article.title.lower() in ["unknwon", "no title"]
+                (article.title.lower() in ["unknwon", "no title"] or not article.title)
                 and result["status"] == "success"
-
             ):
                 result["status"] = "boomerang"
                 result["stop_reason"] = "No Title"

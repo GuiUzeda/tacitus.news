@@ -1,27 +1,18 @@
-import asyncio
 import hashlib
-from os import wait
 import re
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, AsyncGenerator
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 import aiohttp
-from loguru import logger
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select
-
-# Project Imports
-from harvesters.base import BaseHarvester
-from news_events_lib.models import (
-    ArticleContentModel,
-    ArticleModel,
-    JobStatus,
-)
+from config import Settings
 from core.models import ArticlesQueueModel, ArticlesQueueName
 from harvesters.factory import HarvesterFactory
-from config import Settings
+from loguru import logger
+
+# Project Imports
+from news_events_lib.models import ArticleModel, JobStatus
+from sqlalchemy.dialects.postgresql import insert
+from dateutil import parser
 
 # --- DOMAIN CLASS ---
 
@@ -35,7 +26,6 @@ class HarvestingDomain:
 
     async def process_newspaper(
         self,
-        session: Session,
         http_session: aiohttp.ClientSession,
         newspaper_data: dict,
     ):
@@ -67,7 +57,7 @@ class HarvestingDomain:
 
             harvester_instance = self.factory.get_harvester(name)
             # 1. Pipeline Execution
-            total_saved = 0
+
             all_articles = await self._run_pipeline(
                 http_session,
                 feeds,
@@ -78,15 +68,7 @@ class HarvestingDomain:
             )
 
             logger.info(f"[{name}] Extracted {len(all_articles)} items from feeds.")
-
-            if all_articles:
-                saved_objs = self._bulk_save_articles(session, all_articles)
-                if saved_objs:
-                    self._queue_articles_bulk(session, saved_objs)
-                    session.commit()
-                    total_saved = len(saved_objs)
-
-            return total_saved
+            return all_articles
 
         except Exception as e:
             logger.error(f"[{newspaper_data['name']}] Pipeline Failed: {e}")
@@ -116,18 +98,20 @@ class HarvestingDomain:
             if not link_hash:
                 link_hash = hashlib.md5(clean_link.split("?")[0].encode()).hexdigest()
 
-            results.append({
-                "title": entry.get("title"),
-                "link": clean_link,
-                "hash": link_hash,
-                "published": entry.get("published"),
-                "summary": entry.get("summary"),  # Might be None
-                "content": entry.get(
-                    "content"
-                ),  # Might be "Unknown" or full text from RSS
-                "newspaper_id": np_id,
-                "rank": entry.get("rank"),
-            })
+            results.append(
+                {
+                    "title": entry.get("title"),
+                    "link": clean_link,
+                    "hash": link_hash,
+                    "published": self._parse_date(entry.get("published")),
+                    "summary": entry.get("summary"),  # Might be None
+                    "content": entry.get(
+                        "content"
+                    ),  # Might be "Unknown" or full text from RSS
+                    "newspaper_id": np_id,
+                    "rank": entry.get("rank"),
+                }
+            )
 
         return results
 
@@ -139,84 +123,7 @@ class HarvestingDomain:
             clean["published"] = pub.group(0)
         return clean
 
-    def _bulk_save_articles(
-        self, session, articles_data: List[dict]
-    ) -> List[ArticleModel]:
-        if not articles_data:
-            return []
-
-        # Pre-fetch existing hashes to filter duplicates
-        hashes = [d["hash"] for d in articles_data if d.get("hash")]
-        existing_hashes = set()
-        if hashes:
-            existing_hashes = set(session.scalars(
-                select(ArticleModel.url_hash).where(ArticleModel.url_hash.in_(hashes))
-            ).all())
-
-        valid_models = []
-        skipped_count = 0
-        for data in articles_data:
-            h = data.get("hash")
-            if h in existing_hashes:
-                skipped_count += 1
-                continue
-
-            # If content is "Unknown" or empty, we save empty list to be enriched later
-            # If RSS provided content, we save it.
-            contents = []
-            if data.get("content") and data["content"] != "Unknown":
-                contents = [ArticleContentModel(content=data["content"])]
-
-            dt = self._parse_date(data.get("published"))
-            article = ArticleModel(
-                title=data["title"][:500] if data["title"] else "Unknown",
-                original_url=data["link"],
-                url_hash=data["hash"],
-                summary=data["summary"],
-                published_date=dt,
-                newspaper_id=data["newspaper_id"],
-                authors=[],
-                contents=contents,
-                entities=[],
-                interests={},
-                embedding=None,
-                summary_status=JobStatus.PENDING,
-                summary_date=datetime.now(timezone.utc),
-                # UPDATED: Save the Editorial Rank
-                source_rank=data.get("rank"),
-            )
-            valid_models.append(article)
-
-        if skipped_count > 0:
-            logger.info(f"Skipped {skipped_count} duplicates (pre-check).")
-
-        if not valid_models:
-            return []
-
-        try:
-            session.add_all(valid_models)
-            session.flush()
-            return valid_models
-        except IntegrityError as e:
-            logger.warning(f"Bulk save failed (IntegrityError). Retrying one-by-one... {e}")
-            session.rollback()
-            # Fallback: Save one by one to isolate duplicates
-            saved = []
-            for model in valid_models:
-                try:
-                    session.add(model)
-                    session.commit()
-                    saved.append(model)
-                except IntegrityError:
-                    session.rollback()
-            logger.info(f"Recovered {len(saved)} articles via fallback.")
-            return saved
-        except Exception as e:
-            logger.error(f"Save Error: {e}")
-            session.rollback()
-            return []
-
-    def _queue_articles_bulk(self, session, articles: List[ArticleModel]):
+    def queue_articles_bulk(self, session, articles: List[ArticleModel]):
         if not articles:
             return
         now = datetime.now(timezone.utc)
@@ -226,16 +133,22 @@ class HarvestingDomain:
                 continue
 
             # If title is missing, skip Filter and go straight to Enricher
-            target_queue = ArticlesQueueName.ENRICH if a.title.lower() in [ "no title", "unknown"] else ArticlesQueueName.FILTER
+            target_queue = (
+                ArticlesQueueName.ENRICH
+                if a.title.lower() in ["no title", "unknown"]
+                else ArticlesQueueName.FILTER
+            )
 
-            queue_data.append({
-                "article_id": a.id,
-                "status": JobStatus.PENDING,
-                "queue_name": target_queue,
-                "created_at": now,
-                "updated_at": now,
-                "attempts": 0,
-            })
+            queue_data.append(
+                {
+                    "article_id": a.id,
+                    "status": JobStatus.PENDING,
+                    "queue_name": target_queue,
+                    "created_at": now,
+                    "updated_at": now,
+                    "attempts": 0,
+                }
+            )
 
         if queue_data:
             stmt = (
@@ -243,23 +156,18 @@ class HarvestingDomain:
             )
             session.execute(stmt)
 
-    def _parse_date(self, pub_data):
+    def _parse_date(self, pub_data) -> Optional[datetime]:
         now = datetime.now(timezone.utc)
-        if not pub_data:
-            return now
+
         try:
-            dt = None
-            if isinstance(pub_data, str):
-                dt = datetime.fromisoformat(pub_data.replace("Z", "+00:00"))
-            else:
-                dt = pub_data
-            
+            dt = parser.parse(pub_data, dayfirst=True)
+
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
 
             # Future Guard: If date is > 1 hour in future, clamp to now
-            if dt > (now + timedelta(hours=1)):
-                return now
+            if dt > now :
+                return None
             return dt
         except:
-            return now
+            return None

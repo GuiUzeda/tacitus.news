@@ -14,7 +14,7 @@ from news_events_lib.models import NewsEventModel, MergeProposalModel, JobStatus
 from core.models import EventsQueueModel, EventsQueueName
 
 # Domain
-from domain.merger import NewsMergerDomain
+from domain.merger import NewsMergerDomain, MergerAction, MergerResult
 
 class NewsMergerWorker:
     def __init__(self):
@@ -30,7 +30,7 @@ class NewsMergerWorker:
         self.concurrency = 3
 
     async def run(self):
-        logger.info("🔄 News Merger Worker started")
+        logger.info("🕵️ News Merger Scanner started")
         
         self.queue = asyncio.Queue(maxsize=20)
         
@@ -48,11 +48,11 @@ class NewsMergerWorker:
                 # Wait for the queue to drain before starting the next cycle
                 await self.queue.join()
                 
-                logger.info("✅ Cycle complete. Sleeping 60s...")
+                logger.debug("✅ Scan Cycle complete. Sleeping 60s...")
                 await asyncio.sleep(60)
 
             except Exception as e:
-                logger.error(f"Merger Producer Error: {e}")
+                logger.critical(f"Merger Producer Crash: {e}")
                 await asyncio.sleep(30)
 
     async def _producer_cycle(self):
@@ -84,10 +84,9 @@ class NewsMergerWorker:
             event_ids = session.execute(stmt).scalars().all()
 
         if not event_ids:
-            logger.info("📭 No active events to scan.")
             return
 
-        logger.info(f"🔍 Scanning {len(event_ids)} active events for duplicates...")
+        logger.info(f"🔎 Scanning {len(event_ids)} active events for duplicates...")
         for eid in event_ids:
             await self.queue.put(eid)
 
@@ -104,12 +103,38 @@ class NewsMergerWorker:
 
     def _process_single_event(self, event_id):
         # New session for each task to ensure thread safety
-        with self.SessionLocal() as session:
-            try:
-                self.domain.check_and_process_duplicates(session, event_id)
-            except Exception as e:
-                logger.error(f"Merger failed for {event_id}: {e}")
+        session = self.SessionLocal()
+        try:
+            # 1. Call Domain (Logic only, no commit)
+            result: MergerResult = self.domain.scan_and_process_event(session, event_id)
+            
+            # 2. Handle Outcome & Commit
+            if result.action == MergerAction.MERGED:
+                session.commit()
+                logger.success(f"⚡ AUTO-MERGE: {result.reason}")
+                
+            elif result.action == MergerAction.PROPOSED:
+                session.commit()
+                logger.info(f"💡 PROPOSAL: {result.reason}")
+                
+            elif result.action == MergerAction.SKIPPED:
+                # Nothing changed, safe to rollback or just close
+                session.rollback()
+                # Debug logging only to reduce noise
+                # logger.debug(f"Skipped {event_id}: {result.reason}")
+
+            elif result.action == MergerAction.BUSY:
+                session.rollback()
+
+        except Exception as e:
+            logger.error(f"Merger failed for {event_id}: {e}")
+            session.rollback()
+        finally:
+            session.close()
 
 if __name__ == "__main__":
     worker = NewsMergerWorker()
-    asyncio.run(worker.run())
+    try:
+        asyncio.run(worker.run())
+    except KeyboardInterrupt:
+        logger.info("Stopping...")

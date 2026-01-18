@@ -398,7 +398,7 @@ class EventSummaryOutput(BaseModel):
     subtitle: str = Field(..., description="A single sentence expanding on the lead.")
     
     # The Summary Object (Structured for UI)
-    summary: Dict[str, str|list] = Field(..., )
+    summary: Dict[str, str] = Field(..., )
 
     # --- NEW: SCOPE & TAXONOMY ---
     is_international: bool = Field(..., description="TRUE if the event happens outside Brazil and is NOT primarily about Brazilian foreign policy. FALSE if it is local/national.")

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 SESSION="tacitus_logs"
 
 # Check if tmux is installed
-if ! command -v tmux &> /dev/null; then
+if ! command -v tmux > /dev/null 2>&1; then
     echo "tmux is not installed. Please install tmux to use this script."
     exit 1
 fi
@@ -40,19 +40,21 @@ tmux select-pane -t 0
 # Split remaining space to the right to create 5 equal columns
 tmux split-window -h -l '80%' "$(get_cmd worker-filter)"
 tmux split-window -h -l '75%' "$(get_cmd worker-enricher)"
+tmux split-window -h -l '50%' "$(get_cmd worker-analyzer)"
 tmux split-window -h -l '66%' "$(get_cmd worker-cluster)"
-tmux split-window -h -l '50%' "$(get_cmd worker-merger)"
+
 
 # --- ROW 2 (Bottom) ---
 # Navigate to Bottom-Left. 
 # We go to Top-Left (0) then Down.
 tmux select-pane -t 0
 tmux select-pane -D
+tmux split-window -h -l '50%' "$(get_cmd worker-merger)"
 # Split remaining space to the right to create 4 equal columns
 tmux split-window -h -l '75%' "$(get_cmd worker-enhancer)"
 tmux split-window -h -l '66%' "$(get_cmd worker-publisher)"
 # We have 7 workers. The 8th slot is perfect for the Backend.
-tmux split-window -h -l '50%' "$(get_cmd backend)"
+
 
 
 

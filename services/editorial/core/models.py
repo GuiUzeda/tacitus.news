@@ -25,6 +25,8 @@ class ArticlesQueueName(enum.Enum):
     FILTER = "filter"
     ENRICH = "enrich"
     CLUSTER = "cluster"
+    ANALYZE = "analyze"
+
 
 
 class EventsQueueName(enum.Enum):

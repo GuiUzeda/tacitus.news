@@ -366,23 +366,14 @@ class BaseHarvester:
             # 1. Blocklist Check
             if to_block.search(link): continue
 
-            # 2. Date Check (Google News Sitemap)
-            news = u.find("news:news")
 
-            pub_date = None
-            if news:
-                pdate = news.find("news:publication_date")
-                if pdate: pub_date = pdate.text
-
-            if pub_date and not self._is_date_recent(pub_date):
-                continue
             
             
             articles.append({
                 "title": "Unknown", # Sitemaps rarely have titles
                 "link": link,
                 "source": base_domain,
-                "published": pub_date,
+                "published": None,
                 "content": "Unknown",
                 "rank": None, # Sitemaps have no editorial rank
                 "hash": url_hash

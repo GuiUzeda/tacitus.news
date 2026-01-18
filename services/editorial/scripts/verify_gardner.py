@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Settings
 from news_events_lib.models import NewsEventModel, EventStatus, JobStatus
 from core.models import EventsQueueModel
-from services.editorial.workers.cron_gardner import GardnerService
+from workers.cron_gardner import GardnerService
 
 async def verify_gardner_tasks():
     """

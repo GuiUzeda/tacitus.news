@@ -2,11 +2,10 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from loguru import logger
-from sqlalchemy import create_engine, select, update, or_, exists
+from sqlalchemy import create_engine, select, or_, exists
 from sqlalchemy.orm import sessionmaker
 
 # Models
@@ -20,7 +19,7 @@ from config import Settings
 from core.base_worker import BaseQueueWorker
 
 # Domain
-from domain.enhancer import NewsEnhancerDomain
+from domain.enhancing import NewsEnhancerDomain
 
 class NewsEnhancerWorker(BaseQueueWorker):
     def __init__(self):
@@ -28,76 +27,32 @@ class NewsEnhancerWorker(BaseQueueWorker):
         self.engine = create_engine(str(self.settings.pg_dsn))
         self.SessionLocal = sessionmaker(bind=self.engine)
         
-        # Instantiate Domain Logic
+        # Domain
         self.domain = NewsEnhancerDomain(concurrency_limit=5)
 
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=EventsQueueModel,
             target_queue_name=EventsQueueName.ENHANCER,
-            batch_size=5,
+            batch_size=5, # Small batch because LLM summarization is heavy/slow
             pending_status=JobStatus.PENDING
         )
 
     async def run(self):
-        logger.info(f"🚀 Enhancer Worker started (Streaming Mode)")
-        self._reset_stuck_tasks()
-        
-        self.queue = asyncio.Queue(maxsize=10) # Buffer size for consumer
-        
-        # Start Consumers
-        workers = []
-        for i in range(4):
-            workers.append(asyncio.create_task(self._consumer_loop(i)))
-            await asyncio.sleep(1.0)
-        
-        # Producer Loop
-        while True:
-            try:
-                if self.queue.full():
-                    await asyncio.sleep(1.0)
-                    continue
+        logger.info(f"🚀 Enhancer Worker started.")
+        await super().run()
 
-                with self.SessionLocal() as session:
-                    jobs = self._fetch_jobs_strategy(session)
-                    
-                    for job in jobs:
-                        await self.queue.put(job.id)
-
-                if not jobs:
-                    if self.queue.empty():
-                        self._cleanup_stuck_jobs()
-                    logger.debug('No jobs. Sleeping 30s...')
-                    await asyncio.sleep(30)
-                        
-            except Exception as e:
-                logger.error(f"Producer Error: {e}")
-                await asyncio.sleep(5)
-
-    async def _consumer_loop(self, worker_id):
-        while True:
-            job_id = await self.queue.get()
-            try:
-                with self.SessionLocal() as session:
-                    # Re-fetch job inside the consumer transaction
-                    job = session.get(EventsQueueModel, job_id)
-                    if job:
-                        # Delegate to Domain
-                        await self.domain.enhance_event_job(session, job)
-                        session.commit()
-            except Exception as e:
-                logger.error(f"Worker {worker_id} error on job {job_id}: {e}")
-            finally:
-                self.queue.task_done()
-
-    def _fetch_jobs_strategy(self, session):
+    def _fetch_jobs(self, session, limit=None):
         """
-        Smart fetch strategy:
+        Smart fetch strategy override:
         1. Ignore events that are currently involved in Merges (Source or Target).
         2. Prioritize events with high article counts.
         """
-        # Events involved in pending merges
-        active_proposals = select(1).where(
+        session.expire_on_commit = False
+        fetch_limit = limit or self.batch_size
+
+        # Subquery: Find IDs of events involved in pending/processing merges
+        active_merges = select(1).where(
             or_(
                 MergeProposalModel.source_event_id == NewsEventModel.id,
                 MergeProposalModel.target_event_id == NewsEventModel.id
@@ -111,55 +66,48 @@ class NewsEnhancerWorker(BaseQueueWorker):
             .where(
                 EventsQueueModel.status == self.pending_status,
                 EventsQueueModel.queue_name == self.queue_name,
-                ~exists(active_proposals)
+                ~exists(active_merges) # <--- Critical exclusion
             )
             .order_by(NewsEventModel.article_count.desc())
             .order_by(EventsQueueModel.created_at.asc())
-            .limit(self.batch_size)
+            .limit(fetch_limit)
             .with_for_update(skip_locked=True)
         )
+        
         rows = session.execute(stmt).all()
 
         jobs = []
         for queue_item, event in rows:
             queue_item.status = JobStatus.PROCESSING
             queue_item.updated_at = datetime.now(timezone.utc)
-            queue_item.event = event
+            queue_item.event = event # Pre-load relation
             jobs.append(queue_item)
         
         session.commit()
         return jobs
 
-    def _reset_stuck_tasks(self):
-        with self.SessionLocal() as session:
-            result = session.execute(
-                update(EventsQueueModel)
-                .where(
-                    EventsQueueModel.status == JobStatus.PROCESSING,
-                    EventsQueueModel.queue_name == self.queue_name
-                )
-                .values(status=JobStatus.PENDING)
-            )
-            session.commit()
-            if result.rowcount > 0:
-                logger.info(f"🧹 Reset {result.rowcount} stuck enhancer jobs.")
-
-    def _cleanup_stuck_jobs(self, session=None):
-        timeout = timedelta(minutes=15)
-        cutoff = datetime.now(timezone.utc) - timeout
-        
-        with self.SessionLocal() as session:
-            result = session.execute(
-                update(EventsQueueModel)
-                .where(
-                    EventsQueueModel.status == JobStatus.PROCESSING,
-                    EventsQueueModel.queue_name == self.queue_name,
-                    EventsQueueModel.updated_at < cutoff
-                )
-                .values(status=JobStatus.PENDING, msg="Auto-reset: Timeout")
-            )
-            session.commit()
+    async def process_item(self, session, job):
+        """
+        Standard processing hook. Logic delegated to Domain.
+        Transaction handled by BaseWorker.
+        """
+        try:
+            status = await self.domain.enhance_event(session, job)
+            
+            if status in ["ENHANCED", "NO_CHANGES_PUBLISH"]:
+                logger.success(f"Event {job.event.title[:30]}: {status}")
+            elif status == "DEBOUNCED":
+                logger.info(f"Event {job.event.title[:30]}: DEBOUNCED")
+            elif "FAILED" in status:
+                logger.warning(f"Event {job.event_id}: {status}")
+                
+        except Exception as e:
+            logger.error(f"Error enhancing event {job.event_id}: {e}")
+            raise e # Triggers BaseWorker rollback
 
 if __name__ == "__main__":
     worker = NewsEnhancerWorker()
-    asyncio.run(worker.run())
+    try:
+        asyncio.run(worker.run())
+    except KeyboardInterrupt:
+        logger.info("Stopping...")

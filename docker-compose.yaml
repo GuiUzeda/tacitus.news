@@ -85,6 +85,19 @@ services:
       - postgres
     networks:
       - db_network
+  worker-analyzer:
+    image: tacitus-analyzer-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env
+    command: python services/editorial/workers/analyzer.py
+    depends_on:
+      - postgres
+    networks:
+      - db_network
   worker-cluster:
     image: tacitus-editorial-worker
     build:

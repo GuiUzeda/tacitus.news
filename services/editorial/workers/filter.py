@@ -87,7 +87,7 @@ class NewsFilterWorker(BaseQueueWorker):
         if not jobs: return
 
         try:
-            approved, rejected = await self.domain.execute_batch_filtering(session, jobs)
+            approved, rejected = await self.domain.execute_batch_filtering( jobs)
             logger.success(f"✅ Batch Processed: {approved} Approved | ❌ {rejected} Rejected")
         except Exception as e:
             logger.error(f"Critical error in batch processing: {e}")

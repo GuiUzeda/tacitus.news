@@ -1,4 +1,3 @@
-from itertools import count
 import sys
 import os
 
@@ -18,7 +17,7 @@ from config import Settings
 from core.base_worker import BaseQueueWorker
 
 # IMPORT DOMAIN LOGIC
-from domain.enriching import EnrichingDomain
+from domain.enriching import ContentEnricherDomain
 
 
 class NewsEnricherWorker(BaseQueueWorker):
@@ -30,78 +29,26 @@ class NewsEnricherWorker(BaseQueueWorker):
         )
 
         # Instantiate Domain Logic (Manages ProcessPool)
-        self.domain = EnrichingDomain(max_cpu_workers=2, http_concurrency=20)
-        self.TARGET_LLM_BATCH = 10  # We want exactly 10 items per LLM call
+        self.domain = ContentEnricherDomain(max_cpu_workers=2, http_concurrency=20)
 
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=ArticlesQueueModel,
             target_queue_name=ArticlesQueueName.ENRICH,
-            batch_size=20,  # Smaller batch size due to heavy processing
+            batch_size=20, 
             pending_status=JobStatus.PENDING,
         )
 
     async def run(self):
-        logger.info(f"🚀 Smart-Batch Worker started.")
+        # We override run only to call warmup, then delegate to base
+        logger.info(f"🚀 Miner Worker started.")
         self.domain.warmup()
-
-        pending_writes = []
-        llm_buffer = []
-
-        while True:
-            try:
-                with self.SessionLocal() as session:
-                    # --- 1. FETCH & CPU PHASE ---
-                    if len(llm_buffer) < self.TARGET_LLM_BATCH:
-                        needed = self.TARGET_LLM_BATCH - len(llm_buffer)
-                        fetch_size = max(10, needed * 2)
-
-                        jobs = self._fetch_jobs(session, limit=fetch_size)
-
-                        if jobs:
-                            results = await self.domain.run_cpu_enrichment(jobs)
-
-                            for job, res in results:
-                                if res["status"] == "success":
-
-                                    if res["status"] == "boomerang":
-                                        # Mark for _save_results
-                                        pending_writes.append((job, res))
-                                    else:
-                                        # ✅ Standard Gold: Queue for LLM
-                                        llm_buffer.append((job, res))
-                                else:
-                                    # ❌ Garbage (Old/Blocked): Save immediately
-                                    pending_writes.append((job, res))
-
-                        elif not jobs and not llm_buffer and not pending_writes:
-                            logger.info("💤 Queue empty. Sleeping...")
-                            await asyncio.sleep(30)
-                            continue
-
-                    # --- 2. FLUSH TRIGGER ---
-                    should_flush_llm = len(llm_buffer) >= self.TARGET_LLM_BATCH
-                    if not jobs and llm_buffer:  # Flush leftovers if queue is empty
-                        should_flush_llm = True
-
-                    if should_flush_llm:
-                        batch_to_process = llm_buffer[: self.TARGET_LLM_BATCH]
-                        llm_buffer = llm_buffer[self.TARGET_LLM_BATCH :]
-
-                        # Run LLM (Updates dicts in-place)
-                        await self.domain.run_llm_enrichment(batch_to_process)
-                        pending_writes.extend(batch_to_process)
-
-                    # --- 3. WRITE PHASE ---
-                    if pending_writes:
-                        self._save_results(session, pending_writes)
-                        pending_writes = []
-
-            except Exception as e:
-                logger.critical(f"Worker Loop Error: {e}")
-                await asyncio.sleep(5)
+        await super().run()
 
     def _fetch_jobs(self, session, limit=None):
+        """
+        Override standard fetch to prioritize 'Unknown' titles.
+        """
         fetch_limit = limit or self.batch_size
         stmt = (
             select(ArticlesQueueModel, ArticleModel)
@@ -112,11 +59,15 @@ class NewsEnricherWorker(BaseQueueWorker):
             .order_by(ArticlesQueueModel.created_at.asc())
             .with_for_update(skip_locked=True)
         )
+        
+        # 1. Prioritize articles with missing titles
         rows = session.execute(
             stmt.where(
                 ArticleModel.title.in_(["unknown", "no title", "Unknown", "No Title"])
             ).limit(fetch_limit)
         ).all()
+        
+        # 2. Fill remainder with standard articles
         if len(rows) < fetch_limit:
             rows.extend(
                 session.execute(
@@ -138,68 +89,58 @@ class NewsEnricherWorker(BaseQueueWorker):
         session.commit()
         return jobs
 
-    def _save_results(self, session, items: List[Tuple[ArticlesQueueModel, Dict]]):
-        """Single function to handle all status transitions."""
-        if not items:
+    async def process_items(self, session, jobs):
+        """
+        Standard BaseWorker hook. Replaces the custom loop from the old Enricher.
+        """
+        if not jobs:
             return
 
+        # 1. Run CPU Enrichment (Fetch, Parse, Vectorize)
+        results = await self.domain.run_cpu_enrichment(jobs)
+
+        # 2. Process transitions
         count_success = 0
         count_fail = 0
         count_drops = 0
-        count_returns = 0
-
-        for job, res in items:
-            # We need to re-attach job to this session if it came from a previous fetch cycle
-            # (Though if we keep session open, it's fine. If session recreates, we need session.merge)
+        
+        for job, res in results:
+            # Re-attach to current session context
             job = session.merge(job)
-
             status = res["status"]
 
             if status == "success":
-                # Check LLM output
-                if "llm_output" in res:
-                    llm = res["llm_output"]
-                    if llm.status == "valid":
-                        self._apply_data(job, res)  # Map dict to model
-                        job.status = JobStatus.COMPLETED
-                        job.queue_name = ArticlesQueueName.CLUSTER
-                        count_success += 1
-                    else:
-                        logger.debug(f"LLM: {llm.error_message}")
-                        job.status = JobStatus.FAILED
-                        job.msg = f"LLM: {llm.error_message}"
-                        count_fail += 1
+                self._apply_data(job, res)
+                
+                if res.get("status") == "boomerang":
+                    # Title found for previously unknown article -> Re-filter
+                    job.status = JobStatus.PENDING
+                    job.queue_name = ArticlesQueueName.FILTER
+                    job.msg = "Boomerang: Title Found"
+                    logger.info(f"🪃 Boomerang: {job.article.title[:30]}")
                 else:
-                    # Should not happen unless LLM crashed
-                    logger.debug("LLM output missing")
-                    job.status = JobStatus.FAILED
-                    job.msg = "LLM output missing"
-                    count_fail += 1
+                    # Success -> Hand off to Analyst (LLM)
+                    job.status = JobStatus.PENDING
+                    job.queue_name = ArticlesQueueName.ANALYZE
+                    count_success += 1
 
             elif status == "archived":
                 job.status = JobStatus.COMPLETED
                 job.msg = res.get("stop_reason")
-                count_drops += 1  # Not a technical fail, but a drop
+                count_drops += 1
 
             elif status == "failed":
-                logger.debug(res.get("stop_reason"))
                 job.status = JobStatus.FAILED
                 job.msg = res.get("stop_reason")
                 count_fail += 1
 
-            elif status == "boomerang":
-                # Resend to filter
-                count_returns += 1
-                job.article.title = res["title"]
-                job.status = JobStatus.PENDING
-                job.queue_name = ArticlesQueueName.FILTER
-
-        session.commit()
-        logger.info(
-            f"💾 Saved Batch: {count_success} enriched, {count_fail} failed, {count_drops} dropped, {count_returns} returned to filter"
-        )
+        logger.info(f"⛏️  Batch Processed: {count_success} Mined, {count_fail} Failed, {count_drops} Archived")
 
     def _apply_data(self, job, res):
+        """
+        Maps extracted miner data to the article model. 
+        Removed LLM output mapping (that belongs to Analyst).
+        """
         art = job.article
 
         if not art.contents:
@@ -217,21 +158,6 @@ class NewsEnricherWorker(BaseQueueWorker):
             art.published_date = res["published_date"]
 
         art.embedding = res["embedding"]
-
-        llm_out = res.get("llm_output")
-        if llm_out:
-            art.summary = llm_out.summary
-            art.stance = llm_out.stance
-            art.key_points = llm_out.key_points
-            art.interests = llm_out.entities
-            art.entities = [f for i in llm_out.entities.values() for f in i]
-            art.main_topics = llm_out.main_topics
-            art.stance_reasoning = llm_out.stance_reasoning
-            art.clickbait_score = llm_out.clickbait_score
-            art.clickbait_reasoning = llm_out.clickbait_reasoning
-            art.title = llm_out.title
-            art.subtitles = llm_out.subtitles
-
 
 if __name__ == "__main__":
     from multiprocessing import freeze_support

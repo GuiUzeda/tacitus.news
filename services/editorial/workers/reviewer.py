@@ -4,179 +4,137 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
 from itertools import groupby
+from typing import List
 from loguru import logger
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 # Models
-from news_events_lib.models import MergeProposalModel, JobStatus
+from news_events_lib.models import MergeProposalModel, JobStatus, NewsEventModel, EventStatus
 from config import Settings
 from core.base_worker import BaseQueueWorker
-from news_events_lib.models import NewsEventModel, EventStatus
 
-# Domain Logic
+# Domain
 from domain.review import NewsReviewerDomain
-
 
 class NewsReviewerWorker(BaseQueueWorker):
     def __init__(self):
         self.settings = Settings()
-        self.engine = create_engine(str(self.settings.pg_dsn), pool_pre_ping=True)
+        self.engine = create_engine(str(self.settings.pg_dsn))
         self.SessionLocal = sessionmaker(bind=self.engine)
 
-        # Domain
         self.domain = NewsReviewerDomain()
 
-        # Configuration
-        self.concurrency = 3
-
-        # Initialize BaseWorker (Used mainly for structure, run() is overridden)
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=MergeProposalModel,
-            target_queue_name=None,
-            batch_size=10,
-            pending_status=JobStatus.PENDING,     # Ensure this is Enum
-            processing_status=JobStatus.PROCESSING # Ensure this is Enum
+            target_queue_name=None, 
+            batch_size=30, # Fetch enough to group effectively
+            pending_status=JobStatus.PENDING,
+            processing_status=JobStatus.PROCESSING
         )
 
     async def run(self):
-        logger.info(f"🚀 Reviewer Worker started (Concurrency: {self.concurrency})")
+        logger.info(f"🚀 Reviewer Worker started.")
+        await super().run()
 
-        # Internal Queue for Producer-Consumer pattern
-        self.internal_queue = asyncio.Queue(maxsize=15)
+    # --- STRATEGY: GROUPED TRANSACTIONS ---
+    
+    async def process_batch(self):
+        """
+        Custom batch processor.
+        We group proposals by 'Source' and commit each source INDEPENDENTLY.
+        """
+        # PHASE 1: FETCH & LOCK
+        # We use a short transaction just to grab work and mark it PROCESSING
+        jobs = []
+        with self.SessionLocal() as session:
+            session.expire_on_commit = False
+            jobs = self._fetch_jobs_strategy(session)
+            # Commit immediately to release "FOR UPDATE" locks and save PROCESSING state
+            session.commit()
 
-        # Start Consumers
-        workers = []
-        for i in range(self.concurrency):
-            workers.append(asyncio.create_task(self._consumer_loop(i)))
-            await asyncio.sleep(0.5)  # Stagger start
+        if not jobs: 
+            return 0
 
-        # Producer Loop
-        while True:
-            try:
-                # Periodic cleanup
-                self._check_cleanup()
+        # PHASE 2: PROCESS (New Session)
+        # We process the *detached* job objects. We must re-attach them or fetch by ID.
+        with self.SessionLocal() as session:
+            # Re-fetch or Merge is needed because objects are detached. 
+            # However, since we have IDs, we can just query or merge.
+            # Grouping logic:
+            jobs.sort(key=lambda x: str(x.source_article_id or x.source_event_id))
+            
+            for source_id, group in groupby(jobs, key=lambda x: x.source_article_id or x.source_event_id):
+                items = list(group)
+                if not items or not source_id: continue
 
-                if self.internal_queue.full():
-                    await asyncio.sleep(1.0)
-                    continue
-
-                with self.SessionLocal() as session:
-                    # 1. Fetch raw jobs
-                    jobs = self._fetch_jobs_strategy(session)
-
-                    if not jobs:
-                        logger.debug("No jobs. Sleeping...")
-                        await asyncio.sleep(30)
-                        continue
-
-                    # 2. Group by Source (Article OR Event)
-                    # We sort by the composite key of source IDs
-                    jobs.sort(
-                        key=lambda x: str(x.source_article_id or x.source_event_id)
-                    )
-
-                    for source_id, group in groupby(
-                        jobs, key=lambda x: x.source_article_id or x.source_event_id
-                    ):
-                        items = list(group)
-                        if not items:
-                            continue
-
+                # --- TRANSACTION BOUNDARY START ---
+                try:
+                    # Using nested transaction (savepoint) so we can rollback JUST this group on error
+                    with session.begin_nested():
                         is_event_merge = items[0].source_event_id is not None
                         proposal_ids = [p.id for p in items]
 
-                        # Push to Consumers
-                        await self.internal_queue.put(
-                            (source_id, proposal_ids, is_event_merge)
+                        # Call Domain (Pure Logic, No Commit)
+                        result = await self.domain.review_proposals(
+                            session, source_id, proposal_ids, is_event_merge
                         )
+                        
+                        logger.info(f"Source {str(source_id)[:8]}: {result}")
+                    
+                    # If we reach here, this group is staged for commit.
+                
+                except Exception as e:
+                    logger.error(f"❌ Failed group {source_id}: {e}")
+                    # Since we were in begin_nested, the DB changes for this group are already rolled back.
+                    # Now we just mark these jobs as FAILED in memory so the outer commit saves that state.
+                    # We must re-fetch/merge them to update status in this session
+                    for p in items:
+                        failed_job = session.merge(p)
+                        failed_job.status = JobStatus.FAILED
+                        failed_job.reasoning = f"Worker Error: {str(e)[:50]}"
+                        session.add(failed_job)
+                        
+                # --- TRANSACTION BOUNDARY END ---
 
-            except Exception as e:
-                logger.error(f"Producer Error: {e}")
-                await asyncio.sleep(5)
+            # PHASE 3: FINAL COMMIT
+            # This commits all successful groups AND the FAILED statuses for failed groups
+            session.commit()
+            
+        return len(jobs)
 
-    async def _consumer_loop(self, worker_id):
-        while True:
-            source_id, proposal_ids, is_event_merge = await self.internal_queue.get()
-            try:
-                # We create a fresh session for the domain logic thread
-                with self.SessionLocal() as session:
-                    await self.domain.review_proposals(
-                        session, source_id, proposal_ids, is_event_merge
-                    )
-            except Exception as e:
-                logger.error(f"Worker {worker_id} error on {source_id}: {e}")
-            finally:
-                self.internal_queue.task_done()
-
-    def _fetch_jobs_strategy(self, session):
-        """
-        Prioritizes Articles, then Events.
-        Marks fetched rows as 'processing' immediately to prevent double-reads.
-        """
-        urgent_subq = (
-            select(MergeProposalModel.id)
+    def _fetch_jobs_strategy(self, session) -> List[MergeProposalModel]:
+        # Simple priority fetch: Published Events First, then Articles
+        
+        # 1. Published Events (High Priority)
+        urgent = session.scalars(
+            select(MergeProposalModel)
             .join(NewsEventModel, MergeProposalModel.target_event_id == NewsEventModel.id)
             .where(
                 MergeProposalModel.status == JobStatus.PENDING,
                 NewsEventModel.status == EventStatus.PUBLISHED
             )
             .limit(self.batch_size)
-        )
-        urgent_ids = session.execute(urgent_subq).scalars().all()
-        
-        if urgent_ids:
-            # If we find urgent jobs, return them immediately
-            return self._lock_and_fetch(session, MergeProposalModel.id, urgent_ids)
-        subq_art = (
-            select(MergeProposalModel.source_article_id)
-            .where(
-                MergeProposalModel.status == JobStatus.PENDING,
-                MergeProposalModel.source_article_id.is_not(None),
-            )
-            .distinct()
-            .limit(self.batch_size)
-        )
-        article_ids = session.execute(subq_art).scalars().all()
-
-        if article_ids:
-            return self._lock_and_fetch(
-                session, MergeProposalModel.source_article_id, article_ids
-            )
-
-        # B. Events
-        subq_evt = (
-            select(MergeProposalModel.source_event_id)
-            .where(
-                MergeProposalModel.status == JobStatus.PENDING,
-                MergeProposalModel.source_event_id.is_not(None),
-            )
-            .distinct()
-            .limit(self.batch_size)
-        )
-        event_ids = session.execute(subq_evt).scalars().all()
-
-        if event_ids:
-            return self._lock_and_fetch(
-                session, MergeProposalModel.source_event_id, event_ids
-            )
-
-        return []
-
-    def _lock_and_fetch(self, session, column, ids):
-        stmt = (
-            select(MergeProposalModel)
-            .where(column.in_(ids))
-            .where(MergeProposalModel.status == JobStatus.PENDING)
             .with_for_update(skip_locked=True)
-        )
-        proposals = session.execute(stmt).scalars().all()
-        for p in proposals:
-            p.status = JobStatus.PROCESSING
-        session.commit()
-        return proposals
+        ).all()
+        
+        if urgent:
+            for p in urgent: p.status = JobStatus.PROCESSING
+            return urgent
 
+        # 2. General Articles/Events
+        general = session.scalars(
+            select(MergeProposalModel)
+            .where(MergeProposalModel.status == JobStatus.PENDING)
+            .limit(self.batch_size)
+            .with_for_update(skip_locked=True)
+        ).all()
+
+        for p in general: p.status = JobStatus.PROCESSING
+        # Note: We do NOT commit here anymore, the caller does it.
+        
+        return general
 
 if __name__ == "__main__":
     worker = NewsReviewerWorker()
