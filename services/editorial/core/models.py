@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from news_events_lib.models import ArticleModel, BaseModel, NewsEventModel, JobStatus
 from sqlalchemy import (Column, DateTime, Enum, ForeignKey, Index, Integer,
-                        String, Text)
+                        String, Text, func)
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 
@@ -52,8 +52,8 @@ class ArticlesQueueModel(BaseModel):
     # Worker Control
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(),onupdate=func.now())
     msg: Mapped[str] = mapped_column(Text, nullable=True)
     queue_name: Mapped[ArticlesQueueName] = mapped_column(Enum(ArticlesQueueName), default=ArticlesQueueName.FILTER, index=True)
     
@@ -78,8 +78,8 @@ class EventsQueueModel(BaseModel):
 
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
     msg: Mapped[str] = mapped_column(Text, nullable=True)
     queue_name: Mapped[EventsQueueName] = mapped_column(Enum(EventsQueueName), default=EventsQueueName.ENHANCER, index=True)
     

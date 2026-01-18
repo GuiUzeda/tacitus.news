@@ -90,6 +90,7 @@ class NewsPublisherDomain:
                     f"⚡ PUBLISHER AUTO-MERGE: '{event.title}' -> '{existing_event.title}' (Dist: {distance:.3f})"
                 )
                 self.cluster.execute_event_merge(session, event, existing_event)
+                
 
                 job.status = JobStatus.COMPLETED
                 job.msg = f"Auto-Merged into {existing_event.title}"

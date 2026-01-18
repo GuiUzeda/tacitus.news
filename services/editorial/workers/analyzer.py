@@ -96,6 +96,7 @@ class NewsAnalystWorker(BaseQueueWorker):
                 # Success: Data is present
                 job.status = JobStatus.PENDING
                 job.queue_name = ArticlesQueueName.CLUSTER
+                job.article.summary_status = JobStatus.COMPLETED
                 job.msg = "Enriched by LLM"
                 count_success += 1
             

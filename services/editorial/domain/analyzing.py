@@ -1,10 +1,11 @@
 import asyncio
+from datetime import datetime, timezone
 from typing import List, Optional
 from loguru import logger
 
 # Project Imports
 from core.llm_parser import CloudNewsAnalyzer
-from news_events_lib.models import ArticleModel
+from news_events_lib.models import ArticleModel, JobStatus
 from core.models import ArticlesQueueModel
 from config import Settings
 
@@ -78,6 +79,8 @@ class ContentAnalystDomain:
         article.summary = llm_out.summary
         article.stance = llm_out.stance
         article.key_points = llm_out.key_points
+        article.summary_date = datetime.now(timezone.utc)
+        article.summary_status = JobStatus.COMPLETED
         
         # Flatten entities dictionary to list if needed, or store as is
         # Adjust based on your ArticleModel definition for 'entities'

@@ -38,11 +38,13 @@ class NewsEnhancerDomain:
         # 1. Validation
         if not event:
             job.status = JobStatus.FAILED
+            job.updated_at = datetime.now(timezone.utc)
             job.msg = "Event Not Found"
             return "FAILED_MISSING"
             
         if not event.is_active:
             job.status = JobStatus.COMPLETED
+            job.updated_at = datetime.now(timezone.utc)
             job.msg = "Event Inactive"
             return "SKIPPED_INACTIVE"
 
@@ -265,6 +267,8 @@ class NewsEnhancerDomain:
         article.clickbait_score = result.clickbait_score
         article.clickbait_reasoning = result.clickbait_reasoning
         article.summary_status = JobStatus.COMPLETED
+        article.summar_date = datetime.now(timezone.utc)
+
 
     def _extract_summary_text(self, event):
         if event.summary and isinstance(event.summary, dict):

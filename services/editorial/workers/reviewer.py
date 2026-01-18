@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,11 +43,10 @@ class NewsReviewerWorker(BaseQueueWorker):
     
     async def process_batch(self):
         """
-        Custom batch processor.
-        We group proposals by 'Source' and commit each source INDEPENDENTLY.
+        Refactored: Commits each source group immediately ("Commit-as-you-go").
+        Prevents one failure from rolling back valid work from other groups.
         """
         # PHASE 1: FETCH & LOCK
-        # We use a short transaction just to grab work and mark it PROCESSING
         jobs = []
         with self.SessionLocal() as session:
             session.expire_on_commit = False
@@ -57,53 +57,50 @@ class NewsReviewerWorker(BaseQueueWorker):
         if not jobs: 
             return 0
 
-        # PHASE 2: PROCESS (New Session)
-        # We process the *detached* job objects. We must re-attach them or fetch by ID.
+        # PHASE 2: PROCESS & COMMIT PER GROUP
         with self.SessionLocal() as session:
-            # Re-fetch or Merge is needed because objects are detached. 
-            # However, since we have IDs, we can just query or merge.
-            # Grouping logic:
+            # Sort to ensure groupby works correctly
             jobs.sort(key=lambda x: str(x.source_article_id or x.source_event_id))
             
             for source_id, group in groupby(jobs, key=lambda x: x.source_article_id or x.source_event_id):
                 items = list(group)
                 if not items or not source_id: continue
 
-                # --- TRANSACTION BOUNDARY START ---
                 try:
-                    # Using nested transaction (savepoint) so we can rollback JUST this group on error
-                    with session.begin_nested():
-                        is_event_merge = items[0].source_event_id is not None
-                        proposal_ids = [p.id for p in items]
-
-                        # Call Domain (Pure Logic, No Commit)
-                        result = await self.domain.review_proposals(
-                            session, source_id, proposal_ids, is_event_merge
-                        )
-                        
-                        logger.info(f"Source {str(source_id)[:8]}: {result}")
+                    # 1. Prepare Data
+                    proposal_ids = [p.id for p in items]
+                    is_event_merge = items[0].source_event_id is not None
                     
-                    # If we reach here, this group is staged for commit.
-                
+                    # 2. Call Domain Logic (Writes to Session, does NOT commit)
+                    result = await self.domain.review_proposals(
+                        session, source_id, proposal_ids, is_event_merge
+                    )
+                    
+                    # 3. COMMIT IMMEDIATELY
+                    # This saves the changes for this specific source and releases locks
+                    session.commit()
+                    logger.info(f"Source {str(source_id)}: {result} (Committed)")
+
                 except Exception as e:
+                    # 4. Handle Failure for this Group
+                    session.rollback() # Undo pending changes for this group only
                     logger.error(f"❌ Failed group {source_id}: {e}")
-                    # Since we were in begin_nested, the DB changes for this group are already rolled back.
-                    # Now we just mark these jobs as FAILED in memory so the outer commit saves that state.
-                    # We must re-fetch/merge them to update status in this session
-                    for p in items:
-                        failed_job = session.merge(p)
-                        failed_job.status = JobStatus.FAILED
-                        failed_job.reasoning = f"Worker Error: {str(e)[:50]}"
-                        session.add(failed_job)
-                        
-                # --- TRANSACTION BOUNDARY END ---
+                    
+                    # 5. Mark items as FAILED in a fresh transaction
+                    try:
+                        for p in items:
+                            # We must use merge() because 'p' is detached from the Phase 1 session
+                            failed_job = session.merge(p)
+                            failed_job.status = JobStatus.FAILED
+                            failed_job.reasoning = f"Worker Error: {str(e)[:100]}"
+                            session.add(failed_job)
+                        session.commit()
+                    except Exception as commit_err:
+                        logger.critical(f"Failed to save error state: {commit_err}")
+                        session.rollback()
 
-            # PHASE 3: FINAL COMMIT
-            # This commits all successful groups AND the FAILED statuses for failed groups
-            session.commit()
-            
         return len(jobs)
-
+    
     def _fetch_jobs_strategy(self, session) -> List[MergeProposalModel]:
         # Simple priority fetch: Published Events First, then Articles
         
@@ -120,7 +117,9 @@ class NewsReviewerWorker(BaseQueueWorker):
         ).all()
         
         if urgent:
-            for p in urgent: p.status = JobStatus.PROCESSING
+            for p in urgent: 
+                p.status = JobStatus.PROCESSING
+                p.updated_at = datetime.now(timezone.utc) # <--- ADD THIS
             return urgent
 
         # 2. General Articles/Events
@@ -131,7 +130,9 @@ class NewsReviewerWorker(BaseQueueWorker):
             .with_for_update(skip_locked=True)
         ).all()
 
-        for p in general: p.status = JobStatus.PROCESSING
+        for p in general:
+            p.status = JobStatus.PROCESSING
+            p.updated_at = datetime.now(timezone.utc) # <--- ADD THIS
         # Note: We do NOT commit here anymore, the caller does it.
         
         return general

@@ -392,6 +392,14 @@ class NewsCluster:
         article = session.merge(article)
         article.event_id = new_event.id
         session.add(article)
+        new_job = EventsQueueModel(
+            event_id=new_event.id,
+            queue_name=EventsQueueName.ENHANCER,
+            status=JobStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
+        )
+        session.add(new_job)
 
         logger.info(f"🆕 New Event created: {new_event.title[:20]} | Reason: {reason}")
         return new_event.id
@@ -473,6 +481,13 @@ class NewsCluster:
 
         target_event.last_updated_at = datetime.now(timezone.utc)
         session.add(target_event)
-        
+        new_job = EventsQueueModel(
+            event_id=target_event.id,
+            queue_name=EventsQueueName.ENHANCER,
+            status=JobStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
+        )
+        session.add(new_job)
         # Return survivor ID so worker can queue it
         return target_event.id

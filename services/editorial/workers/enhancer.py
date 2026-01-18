@@ -48,7 +48,6 @@ class NewsEnhancerWorker(BaseQueueWorker):
         1. Ignore events that are currently involved in Merges (Source or Target).
         2. Prioritize events with high article counts.
         """
-        session.expire_on_commit = False
         fetch_limit = limit or self.batch_size
 
         # Subquery: Find IDs of events involved in pending/processing merges
