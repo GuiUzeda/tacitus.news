@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pydantic import PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,4 +19,6 @@ class Settings(BaseSettings):
     script_dir: Path = script_dir
     similarity_strict: float = 0.05
     similarity_loose: float = 0.18
+    cutoff_period: timedelta = timedelta(days=7)
+
     

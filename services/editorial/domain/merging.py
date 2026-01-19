@@ -1,5 +1,9 @@
 import sys
 import os
+
+from h11 import Event
+
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import uuid
@@ -16,9 +20,10 @@ from sqlalchemy.orm import Session
 from news_events_lib.models import (
     NewsEventModel, 
     MergeProposalModel, 
-    JobStatus
+    JobStatus,
+    EventsQueueModel, EventsQueueName
 )
-from core.models import EventsQueueModel, EventsQueueName
+from utils.event_manager import EventManager
 from domain.clustering import NewsCluster
 
 class MergerAction(str, Enum):
@@ -57,7 +62,7 @@ class NewsMergerDomain:
             return MergerResult(MergerAction.SKIPPED, event_id, reason="Event inactive or missing")
 
         # 2. Search Candidates
-        candidates = self.cluster.search_news_events_hybrid(
+        candidates = EventManager.search_news_events_hybrid(
             session,
             query_text=event.title,
             query_vector=event.embedding_centroid,
@@ -89,12 +94,12 @@ class NewsMergerDomain:
             if vec_dist < self.AUTO_MERGE_THRESHOLD:
                 # Delegate to Clustering Domain to handle the heavy lifting (Articles, Stats, Tombstone)
                 # This modifies the session but does not commit.
-                survivor_id = self.cluster.execute_event_merge(session, event, candidate)
+                survivor = EventManager.execute_event_merge(session, event, candidate)
                 
                 return MergerResult(
                     MergerAction.MERGED,
                     source_id=event.id,
-                    target_id=survivor_id,
+                    target_id=survivor.id,
                     reason=f"Auto-Merge Dist: {vec_dist:.3f}"
                 )
 

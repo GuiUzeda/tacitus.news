@@ -1,6 +1,7 @@
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Tuple, List, Dict
+from utils.event_manager import EventManager
 from loguru import logger
 from sqlalchemy.orm import Session
 from sqlalchemy import exists, not_, or_, select, and_, desc
@@ -89,10 +90,7 @@ class NewsPublisherDomain:
                 logger.warning(
                     f"⚡ PUBLISHER AUTO-MERGE: '{event.title}' -> '{existing_event.title}' (Dist: {distance:.3f})"
                 )
-                self.cluster.execute_event_merge(session, event, existing_event)
-                
-
-                job.status = JobStatus.COMPLETED
+                EventManager.execute_event_merge(session, event, existing_event)
                 job.msg = f"Auto-Merged into {existing_event.title}"
                 return False
 

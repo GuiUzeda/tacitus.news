@@ -12,9 +12,10 @@ from sqlalchemy.orm import sessionmaker
 from news_events_lib.models import (
     NewsEventModel, 
     MergeProposalModel, 
-    JobStatus
+    JobStatus,
+    EventsQueueModel, EventsQueueName
 )
-from core.models import EventsQueueModel, EventsQueueName
+
 from config import Settings
 from core.base_worker import BaseQueueWorker
 

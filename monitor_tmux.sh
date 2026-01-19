@@ -23,7 +23,7 @@ echo "🚀 Creating Tmux Grid for Tacitus Workers..."
 # Helper to generate the command string
 # We use 'bash -c' to ensure the shell stays open if the container exits/restarts
 get_cmd() {
-    echo "bash -c 'docker compose logs -f --tail=50 $1; echo \"--- Stream exited ---\"; read'"
+    echo "bash -c 'docker compose logs -f --tail=50 --ansi always  $1; echo \"--- Stream exited ---\"; read'"
 }
 
 # --- ROW 1 (Top) ---

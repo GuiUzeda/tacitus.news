@@ -12,12 +12,15 @@ from news_events_lib.models import (
     NewsEventModel,
     ArticleContentModel,
     JobStatus,
+    EventsQueueModel,
+    EventsQueueName,
 )
-from core.models import EventsQueueModel, EventsQueueName
+
 
 # Core & Domain Services
 from core.llm_parser import CloudNewsAnalyzer
 from domain.clustering import NewsCluster
+from utils.event_manager import EventManager
 
 
 class NewsReviewerDomain:
@@ -156,23 +159,26 @@ class NewsReviewerDomain:
             return False
 
         # Execute Merge (Delegates to Cluster Domain)
-        survivor_id = target_id
+
         if is_event_merge:
             source = session.get(NewsEventModel, source_id)
             target = session.get(NewsEventModel, target_id)
-            survivor_id = self.cluster.execute_event_merge(session, source, target)
+            survivor = EventManager.execute_event_merge(session, source, target)
             reason_prefix = "Auto-Merged Events"
         else:
             article = session.get(ArticleModel, source_id)
             event = session.get(NewsEventModel, target_id)
             # Use internal method to link without search
-            self.cluster.link_article_to_event(
+            survivor = EventManager.link_article_to_event(
                 session, event, article, article.embedding
             )
             reason_prefix = "Auto-Merged Article"
-
-        # Trigger Enhancer for the survivor
-        self._queue_event_job(session, survivor_id, EventsQueueName.ENHANCER)
+        EventManager.create_event_queue(
+            session,
+            survivor.id,
+            EventsQueueName.ENHANCER,
+            reason=f"{reason_prefix}: {reason}",
+        )
 
         # Approve winning proposal
         self._update_proposal_status(
@@ -206,10 +212,13 @@ class NewsReviewerDomain:
         article = session.get(ArticleModel, article_id)
         if article:
             # Use public method
-            new_id = self.cluster.execute_new_event_action(
-                session, article, reason="Reviewer: All proposals rejected"
+            new_event = EventManager.execute_new_event_action(session, article)
+            EventManager.create_event_queue(
+                session,
+                new_event.id,
+                EventsQueueName.ENHANCER,
+                reason="New Event From Reviewer: All proposals rejected",
             )
-            self._queue_event_job(session, new_id, EventsQueueName.ENHANCER)
 
             # Reject remaining proposals (PENDING/PROCESSING)
             # We do NOT overwrite REJECTED ones (which contain LLM reasoning)
@@ -235,28 +244,6 @@ class NewsReviewerDomain:
             stmt = stmt.where(MergeProposalModel.id == pid_or_list)
 
         session.execute(stmt)
-
-    def _queue_event_job(self, session, event_id, queue_name):
-        """Idempotent queue insert/update."""
-        now = datetime.now(timezone.utc)
-        existing = session.scalar(
-            select(EventsQueueModel).where(EventsQueueModel.event_id == event_id)
-        )
-        if existing:
-            existing.status = JobStatus.PENDING
-            existing.queue_name = queue_name
-            existing.updated_at = now
-            session.add(existing)
-        else:
-            session.add(
-                EventsQueueModel(
-                    event_id=event_id,
-                    queue_name=queue_name,
-                    status=JobStatus.PENDING,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
 
     # --- DATA FETCHING (Read Only) ---
 

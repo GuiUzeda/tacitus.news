@@ -1,7 +1,7 @@
 import enum
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -50,6 +50,17 @@ class JobStatus(enum.Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
 
+class ArticlesQueueName(enum.Enum):
+    FILTER = "filter"
+    ENRICHER = "enricher"
+    CLUSTER = "cluster"
+    ANALYZER = "analyzer"
+
+
+class EventsQueueName(enum.Enum):
+    ENHANCER = "enhancer"
+    PUBLISHER = "publisher"
+
 
 class BaseModel(DeclarativeBase):
     """Modern SQLAlchemy 2.0 Base."""
@@ -93,9 +104,14 @@ class NewsEventModel(BaseModel):
     )
 
     article_count: Mapped[int] = mapped_column(Integer, default=1, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     last_updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), index=True
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True,
     )
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -114,7 +130,9 @@ class NewsEventModel(BaseModel):
     )
     article_counts_by_bias: Mapped[Dict[str, int]] = mapped_column(JSONB, default=dict)
 
-    last_summarized_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    last_summarized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
     articles_at_last_summary: Mapped[int] = mapped_column(Integer, default=0)
 
     # Centroid is required to create an event, so keep NOT NULL
@@ -143,17 +161,20 @@ class NewsEventModel(BaseModel):
         Float, default=0.0, server_default="0.0", index=True
     )
     published_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, nullable=True, index=True
+        DateTime(timezone=True), nullable=True, index=True
     )
-    is_blind_spot: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, index=True)
-    blind_spot_side: Mapped[Optional[str]]= mapped_column(String, nullable=True, index=True)
-
+    is_blind_spot: Mapped[Optional[bool]] = mapped_column(
+        Boolean, nullable=True, index=True
+    )
+    blind_spot_side: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, index=True
+    )
 
     # (e.g., if CNN had it at #1, this is 1)
     best_source_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    first_article_date = mapped_column(DateTime, nullable=True)
-    last_article_date = mapped_column(DateTime, nullable=True)
+    first_article_date = mapped_column(DateTime(timezone=True), nullable=True)
+    last_article_date = mapped_column(DateTime(timezone=True), nullable=True)
     # New Field: Semantic importance derived by LLM (0-100)
     ai_impact_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ai_impact_reasoning: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -203,12 +224,16 @@ class ArticleModel(BaseModel):
     url_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     original_url: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
-    published_date: Mapped[datetime] = mapped_column(DateTime , nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    published_date: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    ) 
-    summary_date: Mapped[datetime] = mapped_column(DateTime)
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    summary_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     summary_status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus), default=JobStatus.PENDING, index=True
     )
@@ -261,7 +286,9 @@ class ArticleContentModel(BaseModel):
     )
     article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id"), index=True)
     content: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     article: Mapped["ArticleModel"] = relationship()
 
 
@@ -362,8 +389,12 @@ class MergeProposalModel(BaseModel):
         Enum(JobStatus), default=JobStatus.PENDING
     )
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now()
+    )
     # Relationships
     source_article: Mapped[Optional["ArticleModel"]] = relationship(
         foreign_keys=[source_article_id]
@@ -385,3 +416,98 @@ class MergeProposalModel(BaseModel):
             "source_event_id", "target_event_id", name="uq_event_merge_pair"
         ),
     )
+
+
+
+
+class ArticlesQueueModel(BaseModel):
+    @declared_attr.directive
+    def __tablename__(cls) -> str:
+        return "articles_queue"
+
+    id = Column(Integer, primary_key=True, index=True)
+    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("articles.id"))
+    article: Mapped["ArticleModel"] = relationship()
+
+    # # Intelligence
+    # estimated_tokens = Column(Integer) # Calculated during filter stage
+
+    # Worker Control
+    status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus), default=JobStatus.PENDING, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now()
+    )
+    msg: Mapped[str] = mapped_column(Text, nullable=True)
+    queue_name: Mapped[ArticlesQueueName] = mapped_column(
+        Enum(ArticlesQueueName), default=ArticlesQueueName.FILTER, index=True
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_queue_pending_fifo",
+            "updated_at",
+            "queue_name",
+            postgresql_where=(status == JobStatus.PENDING),
+        ),
+
+    )
+
+
+class EventsQueueModel(BaseModel):
+    @declared_attr.directive
+    def __tablename__(cls) -> str:
+        return "events_queue"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("news_events.id"))
+    event: Mapped["NewsEventModel"] = relationship()
+
+    status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus), default=JobStatus.PENDING, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now()
+    )
+    msg: Mapped[str] = mapped_column(Text, nullable=True)
+    queue_name: Mapped[EventsQueueName] = mapped_column(
+        Enum(EventsQueueName), default=EventsQueueName.ENHANCER, index=True
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_events_queue_pending_fifo",
+            "updated_at",
+            "queue_name",
+            postgresql_where=(status == JobStatus.PENDING),
+        ),
+
+    )
+
+
+class AuditLogModel(BaseModel):
+    @declared_attr.directive
+    def __tablename__(cls) -> str:
+        return "audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    target_table: Mapped[str] = mapped_column(String, index=True)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    action: Mapped[str] = mapped_column(String)  # INSERT, UPDATE, DELETE
+    
+    # What changed? (e.g., {"status": [OLD, NEW]})
+    changes: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict)
+    
+    # Who did it? (Optional, if you have user context)
+    actor_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

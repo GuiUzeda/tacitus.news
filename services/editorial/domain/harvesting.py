@@ -5,14 +5,13 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 from config import Settings
-from core.models import ArticlesQueueModel, ArticlesQueueName
+from dateutil import parser
 from harvesters.factory import HarvesterFactory
 from loguru import logger
-
 # Project Imports
-from news_events_lib.models import ArticleModel, JobStatus
+from news_events_lib.models import (ArticleModel, ArticlesQueueModel,
+                                    ArticlesQueueName, JobStatus)
 from sqlalchemy.dialects.postgresql import insert
-from dateutil import parser
 
 # --- DOMAIN CLASS ---
 
@@ -53,7 +52,7 @@ class HarvestingDomain:
                     feeds.append(feed)
 
             feed_list = ", ".join([f.get("url") for f in feeds])
-            logger.info(f"[{name}] 🚀 Harvesting {len(feeds)} feeds: {feed_list}")
+            logger.info(f"[{name}] Harvesting {len(feeds)} feeds: {feed_list}")
 
             harvester_instance = self.factory.get_harvester(name)
             # 1. Pipeline Execution
@@ -100,10 +99,10 @@ class HarvestingDomain:
 
             results.append(
                 {
-                    "title": entry.get("title"),
+                    "title": entry.get("title"),  # Might be "Unknown"
                     "link": clean_link,
                     "hash": link_hash,
-                    "published": self._parse_date(entry.get("published")),
+                    "published": self._parse_date(entry.get("published")), # Might be None
                     "summary": entry.get("summary"),  # Might be None
                     "content": entry.get(
                         "content"
@@ -123,38 +122,7 @@ class HarvestingDomain:
             clean["published"] = pub.group(0)
         return clean
 
-    def queue_articles_bulk(self, session, articles: List[ArticleModel]):
-        if not articles:
-            return
-        now = datetime.now(timezone.utc)
-        queue_data = []
-        for a in articles:
-            if not a.id:
-                continue
 
-            # If title is missing, skip Filter and go straight to Enricher
-            target_queue = (
-                ArticlesQueueName.ENRICH
-                if a.title.lower() in ["no title", "unknown"]
-                else ArticlesQueueName.FILTER
-            )
-
-            queue_data.append(
-                {
-                    "article_id": a.id,
-                    "status": JobStatus.PENDING,
-                    "queue_name": target_queue,
-                    "created_at": now,
-                    "updated_at": now,
-                    "attempts": 0,
-                }
-            )
-
-        if queue_data:
-            stmt = (
-                insert(ArticlesQueueModel).values(queue_data).on_conflict_do_nothing()
-            )
-            session.execute(stmt)
 
     def _parse_date(self, pub_data) -> Optional[datetime]:
         now = datetime.now(timezone.utc)

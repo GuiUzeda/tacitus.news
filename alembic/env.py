@@ -5,14 +5,10 @@ from alembic import context
 
 from sqlalchemy import engine_from_config, pool, text
 
-from news_events_lib.models import AuthorModel, ArticleModel, ArticleContentModel, FeedModel, NewspaperModel, BaseModel
-from services.editorial.core.models import ArticlesQueueModel, EventsQueueModel, ArticlesQueueName, EventsQueueName
+from news_events_lib.models import (
 
-
-
-
-
-
+    BaseModel,
+)
 
 
 # this is the Alembic Config object, which provides
@@ -46,11 +42,12 @@ target_metadata = BaseModel.metadata  # type: ignore
 
 section = config.config_ini_section
 
-database_url = os.environ.get("PG_DSN") or "postgresql://postgre:postgre@localhost:5432/postgre"
+database_url = (
+    os.environ.get("PG_DSN") or "postgresql://postgres:postgres@localhost:5432/postgres"
+)
 
 
-config.set_section_option(section, "POSTGRE_URL",database_url)
-
+config.set_section_option(section, "POSTGRE_URL", database_url)
 
 
 def include_object(object, name, type_, reflected, compare_to):
@@ -105,12 +102,16 @@ def run_migrations_online() -> None:
     with connectable.connect() as connection:  # type: ignore
         # Automatically kill blocking connections to allow migration locks
         try:
-            connection.execute(text("""
+            connection.execute(
+                text(
+                    """
                 SELECT pg_terminate_backend(pid)
                 FROM pg_stat_activity
                 WHERE datname = current_database()
                 AND pid <> pg_backend_pid()
-            """))
+            """
+                )
+            )
             connection.commit()
         except Exception as e:
             print(f"⚠️ Failed to kill blocking connections: {e}")

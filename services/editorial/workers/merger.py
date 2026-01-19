@@ -10,11 +10,11 @@ from sqlalchemy.orm import sessionmaker
 
 # Config & Models
 from config import Settings
-from news_events_lib.models import NewsEventModel, MergeProposalModel, JobStatus
-from core.models import EventsQueueModel, EventsQueueName
+from news_events_lib.models import NewsEventModel, MergeProposalModel, JobStatus, EventsQueueModel, EventsQueueName
+
 
 # Domain
-from domain.merger import NewsMergerDomain, MergerAction, MergerResult
+from services.editorial.domain.merging import NewsMergerDomain, MergerAction, MergerResult
 
 class NewsMergerWorker:
     def __init__(self):
@@ -27,7 +27,7 @@ class NewsMergerWorker:
         
         # Worker Config
         self.SCAN_WINDOW_HOURS = 48  # Only check events updated recently
-        self.concurrency = 3
+        self.concurrency = 1
 
     async def run(self):
         logger.info("🕵️ News Merger Scanner started")

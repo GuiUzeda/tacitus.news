@@ -63,7 +63,7 @@ class BrowserFetcher:
                             else route.continue_()
                         )
 
-                        response = await page.goto(url, timeout=600, wait_until="domcontentloaded")
+                        response = await page.goto(url, timeout=60000,  wait_until="domcontentloaded")
                         await page.wait_for_timeout(2000) # Settle time
 
                         # Close potential popups/overlays

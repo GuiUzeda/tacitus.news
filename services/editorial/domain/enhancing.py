@@ -12,13 +12,14 @@ from news_events_lib.models import (
     ArticleModel,
     JobStatus,
     MergeProposalModel,
-    EventStatus
+    EventStatus,
+    EventsQueueModel, EventsQueueName
 )
-from core.models import EventsQueueModel, EventsQueueName
+
 
 # Core/Services
 from core.llm_parser import CloudNewsAnalyzer
-from domain.aggregator import EventAggregator
+from utils.event_aggregator import EventAggregator
 
 
 class NewsEnhancerDomain:

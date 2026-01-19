@@ -5,8 +5,7 @@ from loguru import logger
 
 # Project Imports
 from core.llm_parser import CloudNewsAnalyzer
-from news_events_lib.models import ArticleModel, JobStatus
-from core.models import ArticlesQueueModel
+from news_events_lib.models import ArticleModel, JobStatus , ArticlesQueueModel
 from config import Settings
 
 class ContentAnalystDomain:

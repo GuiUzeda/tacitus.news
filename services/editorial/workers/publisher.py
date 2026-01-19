@@ -12,8 +12,8 @@ from config import Settings
 from domain.publisher import NewsPublisherDomain
 
 # Models
-from news_events_lib.models import JobStatus
-from core.models import EventsQueueModel, EventsQueueName
+from news_events_lib.models import JobStatus, EventsQueueModel, EventsQueueName
+
 
 class NewsPublisherWorker:
     def __init__(self):

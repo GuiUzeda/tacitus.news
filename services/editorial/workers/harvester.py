@@ -10,18 +10,27 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 import aiohttp
+
 # Imports
 from config import Settings
 from workers.cron_gardner import GardnerService
 from domain.harvesting import HarvestingDomain
 from loguru import logger
-from news_events_lib.models import (ArticleContentModel, ArticleModel,
-                                    FeedModel, JobStatus, NewspaperModel)
+from news_events_lib.models import (
+    ArticleContentModel,
+    ArticleModel,
+    ArticlesQueueModel,
+    ArticlesQueueName,
+    FeedModel,
+    JobStatus,
+    NewspaperModel,
+)
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.dialects.postgresql import insert
 
-
+from news_events_lib.audit import receive_after_flush # audit
 class HarvesterWorker:
     def __init__(self):
         self.settings = Settings()
@@ -71,7 +80,7 @@ class HarvesterWorker:
 
                 logger.success(f"[{self.worker_id}] Cycle Finished.")
                 logger.info(
-                    f"[{self.worker_id}] 🕒 Scheduled Maintenance: Triggering Event Splitter..."
+                    f"[{self.worker_id}] Scheduled Maintenance: Triggering Event Splitter..."
                 )
                 # Use a fresh session for the splitter
                 with self.SessionLocal() as session:
@@ -100,19 +109,18 @@ class HarvesterWorker:
     async def _process_wrapper(self, sem, http_session, np_data):
         async with sem:
             logger.info(
-                f"[{self.worker_id}] [{np_data['name']}] 🗞️  Processing Newspaper..."
+                f"[{self.worker_id}] [{np_data['name']}]  Processing Newspaper..."
             )
 
             # We open a NEW DB session per newspaper to keep transactions short
             # and avoid "idle in transaction" issues during long http requests
+            articles = await self.domain.process_newspaper(http_session, np_data)
             with self.SessionLocal() as session:
                 try:
-                    articles = await self.domain.process_newspaper(
-                        http_session, np_data
-                    )
+
                     saved_articles = self._bulk_save_articles(session, articles)
                     if len(saved_articles) > 0:
-                        self.domain.queue_articles_bulk(session, saved_articles)
+                        self._queue_articles_bulk(session, saved_articles)
                         session.commit()
                         logger.success(
                             f"[{self.worker_id}] [{np_data['name']}] Cycle finished. Total {len(saved_articles)} articles saved."
@@ -261,7 +269,9 @@ class HarvesterWorker:
                 try:
                     session.add(model)
                     session.commit()
-                    session.refresh(model) # Ensure model is fresh and usable for queueing
+                    session.refresh(
+                        model
+                    )  # Ensure model is fresh and usable for queueing
                     saved.append(model)
                 except IntegrityError:
                     session.rollback()
@@ -272,6 +282,38 @@ class HarvesterWorker:
             session.rollback()
             return []
 
+    def _queue_articles_bulk(self, session, articles: List[ArticleModel]):
+        if not articles:
+            return
+        now = datetime.now(timezone.utc)
+        queue_data = []
+        for a in articles:
+            if not a.id:
+                continue
+
+            # If title is missing, skip Filter and go straight to Enricher
+            target_queue = (
+                ArticlesQueueName.ENRICHER
+                if a.title.lower() in ["no title", "unknown"]
+                else ArticlesQueueName.FILTER
+            )
+
+            queue_data.append(
+                {
+                    "article_id": a.id,
+                    "status": JobStatus.PENDING,
+                    "queue_name": target_queue,
+                    "created_at": now,
+                    "updated_at": now,
+                    "attempts": 0,
+                }
+            )
+
+        if queue_data:
+            stmt = (
+                insert(ArticlesQueueModel).values(queue_data).on_conflict_do_nothing()
+            )
+            session.execute(stmt)
 
 if __name__ == "__main__":
     from multiprocessing import freeze_support

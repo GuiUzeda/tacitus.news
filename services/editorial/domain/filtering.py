@@ -1,18 +1,19 @@
-import asyncio
+from ast import Dict
 from datetime import datetime, timezone
 from typing import List, Tuple
 from loguru import logger
-from sqlalchemy.orm import Session
-from sqlalchemy import create_engine
 
 # Models
 from news_events_lib.models import (
-    ArticleModel,
     JobStatus,
+    ArticlesQueueModel,
+    ArticlesQueueName,
 )
-from core.models import ArticlesQueueModel, ArticlesQueueName
+
 from config import Settings
 from core.llm_parser import CloudNewsFilter
+from services.backend import app
+
 
 
 class NewsFilterDomain:
@@ -22,8 +23,8 @@ class NewsFilterDomain:
         self.llm_filter = CloudNewsFilter()
 
     async def execute_batch_filtering(
-        self,  jobs: List[ArticlesQueueModel]
-    ) -> Tuple[int, int]:
+        self, jobs: List[ArticlesQueueModel]
+    ) -> Tuple[List[Dict], List[ArticlesQueueModel]]:
         """
         Orchestrates the filtering process:
         1. Extracts titles from the batch.
@@ -33,7 +34,7 @@ class NewsFilterDomain:
         Returns: (approved_count, rejected_count)
         """
         if not jobs:
-            return 0, 0
+            return [], []
 
         # 1. Prepare Data
         # We assume jobs have 'article' attached or we fetch them.
@@ -51,38 +52,45 @@ class NewsFilterDomain:
                 job.msg = "Article data missing"
 
         if not titles:
-            return 0, 0
+            return [], []
 
         # 2. Call AI (The "Gatekeeper")
         try:
             logger.info(f"🧠 Filtering batch of {len(titles)} articles...")
             approved_indices = await self.llm_filter.filter_batch(titles)
         except Exception as e:
-            logger.error(f"AI Filter failed: {e}")
-            # Mark whole batch as failed so it can be retried later
-            for job in valid_jobs:
-                job.status = JobStatus.FAILED
-                job.msg = f"AI Error: {str(e)[:100]}"
-                job.updated_at = datetime.now(timezone.utc)
-            return 0, 0
+            raise e
 
         # 3. Apply Business Rules (State Transitions)
-        approved_count = 0
-        rejected_count = 0
+        approved = []
+        rejected = []
 
         for idx, job in enumerate(valid_jobs):
+            now = datetime.now(timezone.utc)
+            job.attempts += 1
+            job.updated_at = now
+
             if idx in approved_indices:
                 # RULE: Approved -> Move to ENRICH queue
-                job.status = JobStatus.PENDING
-                job.queue_name = ArticlesQueueName.ENRICH
-                job.msg = None  # Clear any previous errors
-                job.updated_at = datetime.now(timezone.utc)
-                approved_count += 1
+                job.status = JobStatus.COMPLETED
+                job.msg = "Approved by AI Filter"
+
+                forward_job = ArticlesQueueModel(
+                    article_id=job.article.id,
+                    status=JobStatus.PENDING,
+                    queue_name=ArticlesQueueName.ENRICHER,
+                    created_at=now,
+                    updated_at=now,
+                    attempts=0,
+                    msg="Approved by AI Filter"
+                )
+
+                approved.append({"approved": job, "forward": forward_job})
+
             else:
                 # RULE: Rejected -> Mark COMPLETED (Dead End)
                 job.status = JobStatus.COMPLETED
                 job.msg = "Rejected by AI Filter"
-                job.updated_at = datetime.now(timezone.utc)
-                rejected_count += 1
+                rejected.append(job)
 
-        return approved_count, rejected_count
+        return approved, rejected

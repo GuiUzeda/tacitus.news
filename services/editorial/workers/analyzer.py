@@ -9,8 +9,8 @@ from sqlalchemy.orm import sessionmaker, selectinload
 from loguru import logger
 
 # Models
-from news_events_lib.models import ArticleModel, JobStatus
-from core.models import ArticlesQueueModel, ArticlesQueueName
+from news_events_lib.models import ArticleModel, JobStatus,ArticlesQueueModel, ArticlesQueueName
+
 from config import Settings
 from core.base_worker import BaseQueueWorker
 
@@ -30,7 +30,7 @@ class NewsAnalystWorker(BaseQueueWorker):
         super().__init__(
             session_maker=self.SessionLocal,
             queue_model=ArticlesQueueModel,
-            target_queue_name=ArticlesQueueName.ANALYZE,
+            target_queue_name=ArticlesQueueName.ANALYZER,
             batch_size=10, # IMPORTANT: Matches the optimal LLM batch size
             pending_status=JobStatus.PENDING,
         )

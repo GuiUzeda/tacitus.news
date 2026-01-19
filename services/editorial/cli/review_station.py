@@ -7,12 +7,13 @@ from rich.panel import Panel
 from rich.align import Align
 from rich.prompt import Prompt, Confirm
 
-from core.models import EventsQueueModel, JobStatus
+
 from news_events_lib.models import (
     ArticleModel, 
     NewsEventModel, 
     MergeProposalModel, 
-    EventStatus
+    EventStatus,
+    EventsQueueModel, JobStatus
 )
 from cli_common import console, SessionLocal, recalc_event_score
 from menu import Menu
@@ -131,7 +132,8 @@ class ReviewMergesMenu(Menu):
                 
                 elif choice == "n":
                     if Confirm.ask("Create NEW EVENT from this article?"):
-                        self.cluster_service.execute_new_event_action(session, article, reason="Manual Review: Rejected Merge")
+                        new_event = self.cluster_service.execute_new_event_action(session, article, reason="Manual Review: Rejected Merge")
+                        session.add(new_event)
                         session.commit()
                         console.print("[yellow]New Event Created![/yellow]")
                     else:
