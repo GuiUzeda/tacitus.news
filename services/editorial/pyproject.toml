@@ -23,12 +23,11 @@ dependencies = [
     "einops>=0.8.1",
     "streamlit>=1.40.0",
     "pandas>=2.2.0",
+    "rich>=13.7.1",
 ]
-[tool.uv.workspace]
-members = ["common"]
 
 [tool.uv.sources]
-news_events_lib = {path="../../common", editable=true}
+news_events_lib = { workspace = true }
 torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
 

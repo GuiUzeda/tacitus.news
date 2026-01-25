@@ -18,8 +18,5 @@ dependencies = [
     "news_events_lib"
 ]
 
-[tool.uv.workspace]
-members = ["common"]
-
 [tool.uv.sources]
-news_events_lib = {path="../../common", editable=true}
+news_events_lib = { workspace = true }

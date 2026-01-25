@@ -25,7 +25,7 @@ COPY common common
 # --no-dev: Exclude dev-dependencies
 ENV UV_PROJECT_ENVIRONMENT="/app/.venv"
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --package editorial --no-dev
+    uv sync --package editorial --no-dev
 
 # Stage 2: Runtime
 FROM python:3.12-slim-bookworm
