@@ -272,11 +272,17 @@ class NewsEnhancerDomain:
         if event.status not in (EventStatus.PUBLISHED, EventStatus.ARCHIVED):
             event.status = EventStatus.ENHANCED
 
+        # 🛡️ DEADLOCK PREVENTION: Lock Event FIRST (Matches Merger order)
+        session.flush()
+
         # 7. Drain Inbox (Only for successfully processed articles)
         # FIX 3: Slice the list using processed_count
         for article in delta_articles[:processed_count]:
             article.summary_status = JobStatus.APPROVED
             session.add(article)
+
+        # 🛡️ Lock Articles SECOND
+        session.flush()
 
         return EnhancerResult(
             EnhancerAction.ENHANCED,
