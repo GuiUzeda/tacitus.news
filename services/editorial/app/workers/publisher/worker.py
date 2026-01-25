@@ -59,7 +59,15 @@ class NewsPublisherWorker(BaseQueueWorker):
                 MergeProposalModel.source_event_id == NewsEventModel.id,
                 MergeProposalModel.target_event_id == NewsEventModel.id,
             ),
-            MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
+            MergeProposalModel.status.in_(
+                [JobStatus.PROCESSING]
+            ),  # Only processing to speedup publish
+        )
+
+        active_enhancers = select(1).where(
+            NewsEventModel.id == EventsQueueModel.event_id,
+            EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
+            EventsQueueModel.status.in_([JobStatus.PROCESSING]),
         )
 
         ProcessingQueue = aliased(EventsQueueModel)
@@ -74,7 +82,11 @@ class NewsPublisherWorker(BaseQueueWorker):
             select(EventsQueueModel, NewsEventModel)
             .join(latest_ticket_ids, EventsQueueModel.id == latest_ticket_ids.c.max_id)
             .join(NewsEventModel, EventsQueueModel.event_id == NewsEventModel.id)
-            .where(~exists(active_merges), ~exists(active_processing_events))
+            .where(
+                ~exists(active_merges),
+                ~exists(active_processing_events),
+                ~exists(active_enhancers),
+            )
             .order_by(EventsQueueModel.created_at.desc())
             .limit(fetch_limit)
             .with_for_update(
