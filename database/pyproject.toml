@@ -1,0 +1,15 @@
+[project]
+name = "database"
+version = "0.1.0"
+description = "Database Migrations for Tacitus"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.15.1",
+    "psycopg2-binary>=2.9.11",
+    "sqlalchemy>=2.0.46",
+    "pgvector>=0.2.5",
+    "news_events_lib",
+]
+
+[tool.uv.sources]
+news_events_lib = { workspace = true }

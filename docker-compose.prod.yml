@@ -1,0 +1,138 @@
+services:
+  postgres:
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          memory: 1G
+    profiles: ["core", "db"]
+
+  backend:
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      mode: replicated
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    profiles: ["core", "api"]
+
+  x-worker-base: &worker-defaults
+    restart: unless-stopped
+    stop_grace_period: 2m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 300M
+        reservations:
+          memory: 100M
+
+  worker-enricher:
+    <<: *worker-defaults
+    deploy:
+      mode: replicated
+      replicas: 4
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1.5G
+        reservations:
+          memory: 512M
+    profiles: ["processing", "scrapers"]
+
+  worker-enhancer:
+    <<: *worker-defaults
+    deploy:
+      mode: replicated
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 600M
+        reservations:
+          memory: 200M
+    profiles: ["editorial", "ai"]
+
+  worker-reviewer:
+    <<: *worker-defaults
+    deploy:
+      mode: replicated
+      replicas: 6
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 600M
+        reservations:
+          memory: 200M
+    profiles: ["editorial", "ai"]
+
+  worker-harvester:
+    <<: *worker-defaults
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    profiles: ["ingestion", "scrapers"]
+
+  worker-filter:
+    <<: *worker-defaults
+    profiles: ["ingestion", "ai"]
+
+  worker-analyzer:
+    <<: *worker-defaults
+    deploy:
+      mode: replicated
+      replicas: 2
+    profiles: ["processing", "ai"]
+
+  worker-cluster:
+    <<: *worker-defaults
+    profiles: ["processing", "events"]
+
+  worker-merger:
+    <<: *worker-defaults
+    profiles: ["editorial", "events"]
+
+  worker-publisher:
+    <<: *worker-defaults
+    profiles: ["editorial", "events"]
+
+  worker-gardener:
+    <<: *worker-defaults
+    profiles: ["maintenance"]
+
+  dashboard:
+    <<: *worker-defaults
+    restart: always
+    profiles: ["core", "frontend"]
+
+volumes:
+  postgres_data:
+
+networks:
+  db_network: {}

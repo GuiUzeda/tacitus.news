@@ -1,0 +1,192 @@
+[
+  {
+    "model_id": "cerebras/gpt-oss-120b",
+    "limits": [
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 60000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 1000000 },
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "cerebras/llama3.1-8b",
+    "limits": [
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 60000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 1000000 },
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "cerebras/llama-3.3-70b",
+    "limits": [
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 60000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 1000000 },
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "cerebras/qwen-3-32b",
+    "limits": [
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 60000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 1000000 },
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "cerebras/qwen-3-235b-a22b-instruct-2507",
+    "limits": [
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 60000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 1000000 },
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "cerebras/zai-glm-4.7",
+    "limits": [
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 150000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 1000000 },
+      { "metric": "requests", "window_seconds": 60, "limit_value": 10 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 100 }
+    ]
+  },
+  {
+    "model_id": "groq/llama-3.1-8b-instant",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 6000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 500000 }
+    ]
+  },
+  {
+    "model_id": "groq/llama-3.3-70b-versatile",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 12000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 100000 }
+    ]
+  },
+  {
+    "model_id": "groq/meta-llama/llama-4-maverick-17b-128e-instruct",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 6000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 500000 }
+    ]
+  },
+  {
+    "model_id": "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 30000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 500000 }
+    ]
+  },
+  {
+    "model_id": "groq/moonshotai/kimi-k2-instruct",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 60 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 10000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 300000 }
+    ]
+  },
+  {
+    "model_id": "groq/moonshotai/kimi-k2-instruct-0905",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 60 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 10000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 300000 }
+    ]
+  },
+  {
+    "model_id": "groq/openai/gpt-oss-120b",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 8000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 200000 }
+    ]
+  },
+  {
+    "model_id": "groq/qwen/qwen3-32b",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 60 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 6000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 },
+      { "metric": "tokens", "window_seconds": 86400, "limit_value": 500000 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemma-3-1b-it",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 15000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemma-3-2b-it",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 15000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemma-3-4b-it",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 15000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemma-3-12b-it",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 15000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemma-3-27b-it",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 30 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 15000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 14400 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemini-2.5-flash-lite",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 10 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 250000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 20 }
+    ]
+  },
+  {
+    "model_id": "gemini/gemini-2.5-flash",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 5 },
+      { "metric": "tokens", "window_seconds": 60, "limit_value": 250000 },
+      { "metric": "requests", "window_seconds": 86400, "limit_value": 20 }
+    ]
+  },
+  {
+    "model_id":"openrouter/google/gemma-3-27b-it:free",
+    "limits": [
+      { "metric": "requests", "window_seconds": 60, "limit_value": 20 },
+    { "metric": "requests", "window_seconds": 86400, "limit_value": 1000 }
+
+    ]
+  }
+]

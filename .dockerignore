@@ -1,0 +1,26 @@
+# Version Control
+.git/
+
+# Python Virtual Environments
+.venv/
+services/backend/.venv/
+services/editorial/.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Gemini
+.gemini/
+
+# Temporary / Dev Data
+dev/
+*.log

@@ -1,0 +1,213 @@
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./dev/db_data:/var/lib/postgresql
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          memory: 1G
+    profiles: ["core", "db"]
+    labels:
+      - "dev.dozzle.group=Database"
+      - "dev.dozzle.icon=database"
+
+  backend:
+    entrypoint: []
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload", "--reload-dir", "/app/services/backend/app", "--reload-dir", "/app/common"]
+    volumes:
+      - ./services/backend/app:/app/services/backend/app
+      - ./common:/app/common
+    ports:
+      - "8080:8080"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    profiles: ["core", "api"]
+    labels:
+      - "dev.dozzle.group=API"
+      - "dev.dozzle.icon=server"
+
+  # Template for Dev Environment
+  x-worker-base: &worker-defaults
+    volumes:
+      - ./services/editorial/app:/app/services/editorial/app
+      - ./common:/app/common
+      - ./services/editorial/dev-runner.sh:/app/services/editorial/dev-runner.sh
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - db_network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 300M
+        reservations:
+          memory: 100M
+
+  worker-enricher:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/enricher/worker.py app/workers/enricher
+    deploy:
+      mode: replicated
+      replicas: 4
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1.5G
+        reservations:
+          memory: 512M
+    profiles: ["worker", "processing", "scrapers"]
+    labels:
+      - "dev.dozzle.group=Enricher"
+      - "dev.dozzle.icon=download"
+
+  worker-enhancer:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/enhancer/worker.py app/workers/enhancer
+    deploy:
+      mode: replicated
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 600M
+        reservations:
+          memory: 200M
+    profiles: ["worker","editorial", "ai"]
+    labels:
+      - "dev.dozzle.group=Enhancer"
+      - "dev.dozzle.icon=magic"
+
+  worker-reviewer:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/reviewer/worker.py app/workers/reviewer
+    deploy:
+      mode: replicated
+      replicas: 6
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 600M
+        reservations:
+          memory: 200M
+    profiles: ["worker","editorial", "ai"]
+    labels:
+      - "dev.dozzle.group=Reviewer"
+      - "dev.dozzle.icon=user-check"
+
+  worker-harvester:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/harvester/worker.py app/workers/harvester
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    profiles: ["worker","ingestion", "scrapers"]
+    labels:
+      - "dev.dozzle.group=Harvester"
+      - "dev.dozzle.icon=wheat"
+
+  worker-filter:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/filter/worker.py app/workers/filter
+    profiles: ["ingestion", "ai"]
+    labels:
+      - "dev.dozzle.group=Filter"
+      - "dev.dozzle.icon=filter"
+
+  worker-analyzer:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/analyzer/worker.py app/workers/analyzer
+    deploy:
+      mode: replicated
+      replicas: 2
+    profiles: ["worker","processing", "ai"]
+    labels:
+      - "dev.dozzle.group=Analyzer"
+      - "dev.dozzle.icon=brain"
+
+  worker-cluster:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/cluster/worker.py app/workers/cluster
+    profiles: ["worker","processing", "events"]
+    labels:
+      - "dev.dozzle.group=Cluster"
+      - "dev.dozzle.icon=layers"
+
+  worker-merger:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/merger/worker.py app/workers/merger
+    profiles: ["worker","editorial", "events"]
+    labels:
+      - "dev.dozzle.group=Merger"
+      - "dev.dozzle.icon=git-merge"
+
+  worker-publisher:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/publisher/worker.py app/workers/publisher
+    profiles: ["worker","editorial", "events"]
+    labels:
+      - "dev.dozzle.group=Publisher"
+      - "dev.dozzle.icon=newspaper"
+
+  worker-gardener:
+    <<: *worker-defaults
+    command: ./dev-runner.sh app/workers/gardener/worker.py app/workers/gardener
+    profiles: ["maintenance"]
+    labels:
+      - "dev.dozzle.group=Gardener"
+      - "dev.dozzle.icon=trash-2"
+
+  dashboard:
+    <<: *worker-defaults
+    command: uv run streamlit run app/dashboard.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    profiles: ["core", "frontend"]
+    labels:
+      - "dev.dozzle.group=Dashboard"
+      - "dev.dozzle.icon=monitor"
+
+  # ---------------------------------------------------------------------------
+  # 🔍 OBSERVABILITY (Dev Only)
+  # ---------------------------------------------------------------------------
+  dozzle:
+    image: amir20/dozzle:latest
+    volumes:
+      - /run/user/1000/docker.sock:/var/run/docker.sock
+    ports:
+      - "8888:8080"
+    networks:
+      - db_network
+    profiles: ["monitoring", "core"]
+    labels:
+      - "dev.dozzle.group=System"
+      - "dev.dozzle.icon=eye"
+
+networks:
+  db_network: {}

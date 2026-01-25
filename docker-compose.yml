@@ -1,0 +1,118 @@
+services:
+  # ---------------------------------------------------------------------------
+  # 💾 DATABASE
+  # ---------------------------------------------------------------------------
+  postgres:
+    build:
+      context: .
+      dockerfile: services/db/Dockerfile
+    env_file:
+      - .env.docker
+    networks:
+      - db_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 🔌 API BACKEND
+  # ---------------------------------------------------------------------------
+  backend:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    image: editorial/backend
+    build:
+      context: .
+      dockerfile: services/backend/Dockerfile
+      network: host
+    env_file:
+      - .env.docker
+    networks:
+      - db_network
+
+  # ---------------------------------------------------------------------------
+  # 🏗️ WORKER TEMPLATE
+  # ---------------------------------------------------------------------------
+  x-worker-base: &worker-defaults
+    image: tacitus-editorial-worker
+    build:
+      context: .
+      dockerfile: services/editorial/Dockerfile
+      network: host
+    env_file:
+      - .env.docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - db_network
+    init: true
+
+  # ---------------------------------------------------------------------------
+  # 🐢 HEAVY WORKERS
+  # ---------------------------------------------------------------------------
+  worker-enricher:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.enricher.worker
+    ipc: host
+    security_opt:
+      - seccomp:unconfined
+
+  worker-enhancer:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.enhancer.worker
+
+  worker-reviewer:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.reviewer.worker
+
+  # ---------------------------------------------------------------------------
+  # 🐇 LIGHT WORKERS
+  # ---------------------------------------------------------------------------
+  worker-harvester:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.harvester.worker
+    shm_size: '4gb'
+    ipc: host
+    security_opt:
+      - seccomp:unconfined
+
+  worker-filter:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.filter.worker
+
+  worker-analyzer:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.analyzer.worker
+
+  worker-cluster:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.cluster.worker
+
+  worker-merger:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.merger.worker
+
+  worker-publisher:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.publisher.worker
+
+  worker-gardener:
+    <<: *worker-defaults
+    command: uv run python -m app.workers.gardener.worker
+
+  dashboard:
+    <<: *worker-defaults
+    command: uv run streamlit run app/dashboard.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+
+volumes:
+  services:
+    external: true
+
+networks:
+  db_network: {}

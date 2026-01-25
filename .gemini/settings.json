@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "Tacitus Editorial": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--env-file",
+        "services/editorial/app/.env",
+        "--with",
+        "fastmcp",
+        "fastmcp",
+        "run",
+        "services/editorial/app/mcp_server.py"
+      ]
+    }
+  }
+}

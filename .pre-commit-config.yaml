@@ -1,0 +1,61 @@
+repos:
+# --- UNIVERSAL CHECKS (Runs on everything) ---
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+  - id: trailing-whitespace
+  - id: end-of-file-fixer
+  - id: check-yaml
+  - id: check-json
+  - id: check-added-large-files
+    args: [ '--maxkb=5000' ] # Block big files > 5MB
+
+# --- PYTHON BACKEND (services/editorial & services/backend) ---
+- repo: https://github.com/psf/black
+  rev: 26.1.0
+  hooks:
+  - id: black
+    files: ^services/(editorial|backend)/
+
+- repo: https://github.com/pycqa/isort
+  rev: 7.0.0
+  hooks:
+  - id: isort
+    files: ^services/(editorial|backend)/
+    args: [ "--profile", "black" ] # <--- ADD THIS LINE
+
+- repo: https://github.com/pycqa/flake8
+  rev: 7.3.0
+  hooks:
+  - id: flake8
+    files: ^services/(editorial|backend)/
+    args: [ '--max-line-length=88', '--ignore=E203,E501,W503' ]
+
+# --- NEXT.JS FRONTEND (services/frontend) ---
+# Option A: Use Prettier Mirror (Fastest, no local npm needed)
+- repo: https://github.com/pre-commit/mirrors-prettier
+  rev: v4.0.0-alpha.8
+  hooks:
+  - id: prettier
+    files: ^services/frontend/
+    types_or: [ javascript, jsx, ts, tsx, css, scss, json ]
+
+# Option B: Run Local ESLint (Best for Next.js logic checks)
+# This requires 'npm install' to have run in services/frontend
+- repo: local
+  hooks:
+  - id: next-lint
+    name: Next.js Lint
+    entry: bash -c 'cd services/frontend && npm run lint'
+    language: system
+    files: ^services/frontend/
+    types_or: [ javascript, jsx, ts, tsx ]
+    pass_filenames: false # Next lint checks the whole project better
+
+# --- SECURITY (Global) ---
+- repo: https://github.com/Yelp/detect-secrets
+  rev: v1.5.0
+  hooks:
+  - id: detect-secrets
+    args: [ '--baseline', '.secrets.baseline' ]
+    exclude: package-lock.json|uv.lock
