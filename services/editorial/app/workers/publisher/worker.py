@@ -59,7 +59,9 @@ class NewsPublisherWorker(BaseQueueWorker):
                 MergeProposalModel.source_event_id == NewsEventModel.id,
                 MergeProposalModel.target_event_id == NewsEventModel.id,
             ),
-            MergeProposalModel.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
+            MergeProposalModel.status.in_(
+                [JobStatus.PROCESSING]
+            ),  # Only processing to speedup publish
         )
 
         ProcessingQueue = aliased(EventsQueueModel)
@@ -69,12 +71,23 @@ class NewsPublisherWorker(BaseQueueWorker):
             ProcessingQueue.status == JobStatus.PROCESSING,
         )
 
+        EnhancerQueue = aliased(EventsQueueModel)
+        active_enhancers = select(1).where(
+            EnhancerQueue.event_id == NewsEventModel.id,
+            EnhancerQueue.queue_name == EventsQueueName.ENHANCER,
+            EnhancerQueue.status.in_([JobStatus.PROCESSING]),
+        )
+
         # 3. Final Join to fetch only the "Winners" of the deduplication
         stmt = (
             select(EventsQueueModel, NewsEventModel)
             .join(latest_ticket_ids, EventsQueueModel.id == latest_ticket_ids.c.max_id)
             .join(NewsEventModel, EventsQueueModel.event_id == NewsEventModel.id)
-            .where(~exists(active_merges), ~exists(active_processing_events))
+            .where(
+                ~exists(active_merges),
+                ~exists(active_processing_events),
+                ~exists(active_enhancers),
+            )
             .order_by(EventsQueueModel.created_at.desc())
             .limit(fetch_limit)
             .with_for_update(
