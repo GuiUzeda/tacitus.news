@@ -1,7 +1,3 @@
-Here is the updated `CONTRIBUTING.md`. I have replaced the manual CLI merge instructions with a strict **Pull Request Workflow**, which aligns with your new branch protection rules.
-
----
-
 # Contributing to Tacitus.news
 
 Welcome to the Tacitus Intelligence Engine. This project follows a **Senior Engineering Workflow** designed for stability, observability, and a clean linear history.
@@ -13,28 +9,26 @@ Please follow these guidelines to maintain the integrity of the codebase.
 This project uses the **Docker Compose Override Pattern**. You do not need to manually configure a development environment.
 
 1. **Clone the repo:**
-```bash
-git clone https://github.com/guiuzeda/tacitus.news.git
-cd tacitus.news
 
-```
-
+    ```bash
+    git clone https://github.com/guiuzeda/tacitus.news.git
+    cd tacitus.news
+    ```
 
 2. **Start the Stack:**
-Docker automatically loads `docker-compose.override.yaml` for local development (enabling hot-reloading and exposing ports).
-```bash
-docker compose up -d
 
-```
+    Docker automatically loads `docker-compose.override.yaml` for local development (enabling hot-reloading and exposing ports).
 
+    ```bash
+    docker compose up -d
+    ```
 
 3. **Access Services:**
-* **Frontend:** `http://localhost:3000`
-* **Backend API:** `http://localhost:8000/docs`
-* **Log Dashboard (Dozzle):** `http://localhost:8080`
-* **Database:** Exposed on `localhost:5432`
 
-
+    * **Frontend:** `http://localhost:3000`
+    * **Backend API:** `http://localhost:8000/docs`
+    * **Log Dashboard (Dozzle):** `http://localhost:8080`
+    * **Database:** Exposed on `localhost:5432`
 
 ---
 
@@ -46,12 +40,19 @@ We strictly enforce a **Linear History** on `main` using **Pull Requests**.
 ### 1. Branching Strategy
 
 * **Source of Truth:** `main` (Always deployable).
-* **Feature Branches:** Create short-lived branches for every task. Use the correct prefix:
-* `feat/heartbeat-mechanism`
-* `fix/rss-parsing-error`
-* `chore/update-dependencies`
+* **Feature Branches:** Create short-lived branches for every task.
 
+**Standard Naming Prefixes:**
+Your branch name **must** start with one of the following:
 
+| Prefix | Use Case | Example |
+| --- | --- | --- |
+| `feat/` | New features | `feat/heartbeat-mechanism` |
+| `fix/` | Bug fixes | `fix/rss-parsing-error` |
+| `chore/` | Config, Docker, deps | `chore/update-python-version` |
+| `refactor/` | Code cleanup, no logic change | `refactor/middleware-logic` |
+| `docs/` | Documentation changes | `docs/api-endpoints` |
+| `perf/` | Performance tuning | `perf/db-indexing` |
 
 ### 2. Commit Strategy (Local)
 
@@ -65,25 +66,38 @@ While working on your branch, commit as often as you like ("wip", "saving work")
 To merge your code, you must open a Pull Request (PR).
 
 1. **Push your branch:**
-```bash
-git push -u origin feat/my-feature
 
-```
-
+    ```bash
+    git push -u origin feat/my-feature
+    ```
 
 2. **Open PR on GitHub:**
-* **Title:** MUST follow [Conventional Commits](https://www.google.com/search?q=%23-conventional-commits) (e.g., `feat(worker): add heartbeat mechanism`).
-* **Body:** Briefly explain the *why* and *how*.
 
+    * **Title:** MUST follow [Conventional Commits](https://www.google.com/search?q=%23-conventional-commits) (e.g., `feat(worker): add heartbeat mechanism`).
+    * **Body:** Briefly explain the *why* and *how*.
 
 3. **CI Checks:** Wait for the `pre-commit` and build checks to pass (Green ✅).
+
 4. **Merge:** Use the **"Squash and Merge"** button.
-* *Do not use "Create a merge commit".*
-* *Do not use "Rebase and merge".*
 
+    * *Do not use "Create a merge commit".*
+    * *Do not use "Rebase and merge".*
 
+### 4. Cleanup (Post-Merge)
 
-This ensures `main` only ever contains high-quality, semantic commits.
+Once merged, the branch is dead. Delete it to keep your environment clean.
+
+**Remote:** Click "Delete branch" on the GitHub PR page.
+
+**Local:**
+
+```bash
+git checkout main
+git pull origin main    # Get the new squashed code
+git branch -D feat/my-feature # Force delete local branch
+git remote prune origin # Clean up dead remote references
+
+```
 
 ---
 
