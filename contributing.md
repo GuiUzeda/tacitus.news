@@ -17,50 +17,85 @@ This project uses the **Docker Compose Override Pattern**. You do not need to ma
 
 2. **Start the Stack:**
 
-Docker automatically loads `docker-compose.override.yaml` for local development (enabling hot-reloading and exposing ports).
+    Docker automatically loads `docker-compose.override.yaml` for local development (enabling hot-reloading and exposing ports).
 
     ```bash
-        docker compose up -d
+    docker compose up -d
     ```
 
 3. **Access Services:**
 
-* **Frontend:** `http://localhost:3000`
-* **Backend API:** `http://localhost:8000/docs`
-* **Log Dashboard (Dozzle):** `http://localhost:8080`
-* **Database:** Exposed on `localhost:5432`
+    * **Frontend:** `http://localhost:3000`
+    * **Backend API:** `http://localhost:8000/docs`
+    * **Log Dashboard (Dozzle):** `http://localhost:8080`
+    * **Database:** Exposed on `localhost:5432`
 
 ---
 
 ## 🌳 Git Workflow: Trunk-Based Development
 
-We strictly enforce a **Linear History** on `main`. Do not push directly to `main`.
+We strictly enforce a **Linear History** on `main` using **Pull Requests**.
+**Direct pushes to `main` are blocked.**
 
 ### 1. Branching Strategy
 
 * **Source of Truth:** `main` (Always deployable).
 * **Feature Branches:** Create short-lived branches for every task.
-* `feat/heartbeat-mechanism`
-* `fix/rss-parsing-error`
-* `chore/update-dependencies`
+
+**Standard Naming Prefixes:**
+Your branch name **must** start with one of the following:
+
+| Prefix | Use Case | Example |
+| --- | --- | --- |
+| `feat/` | New features | `feat/heartbeat-mechanism` |
+| `fix/` | Bug fixes | `fix/rss-parsing-error` |
+| `chore/` | Config, Docker, deps | `chore/update-python-version` |
+| `refactor/` | Code cleanup, no logic change | `refactor/middleware-logic` |
+| `docs/` | Documentation changes | `docs/api-endpoints` |
+| `perf/` | Performance tuning | `perf/db-indexing` |
 
 ### 2. Commit Strategy (Local)
 
-While working on your branch, commit as often as you like ("wip", "saving work"). These messy commits will be squashed later.
+While working on your branch, commit as often as you like ("wip", "saving work").
 
-### 3. Merging (The "Squash" Ritual)
+* You do **not** need to format these commit messages perfectly.
+* These messy commits will be **squashed** into a single clean commit when merging.
 
-We use **Squash Merges** to keep the `main` history clean.
+### 3. Pull Request Process (The Golden Rule)
 
-* **Option A (GitHub UI):** Open a Pull Request and select "Squash and Merge".
-* **Option B (CLI):**
+To merge your code, you must open a Pull Request (PR).
+
+1. **Push your branch:**
+
+    ```bash
+    git push -u origin feat/my-feature
+    ```
+
+2. **Open PR on GitHub:**
+
+    * **Title:** MUST follow [Conventional Commits](https://www.google.com/search?q=%23-conventional-commits) (e.g., `feat(worker): add heartbeat mechanism`).
+    * **Body:** Briefly explain the *why* and *how*.
+
+3. **CI Checks:** Wait for the `pre-commit` and build checks to pass (Green ✅).
+
+4. **Merge:** Use the **"Squash and Merge"** button.
+
+    * *Do not use "Create a merge commit".*
+    * *Do not use "Rebase and merge".*
+
+### 4. Cleanup (Post-Merge)
+
+Once merged, the branch is dead. Delete it to keep your environment clean.
+
+**Remote:** Click "Delete branch" on the GitHub PR page.
+
+**Local:**
 
 ```bash
 git checkout main
-git merge --squash feat/my-feature
-git commit -m "feat(worker): add heartbeat mechanism to base class"
-git branch -D feat/my-feature
-git push origin main
+git pull origin main    # Get the new squashed code
+git branch -D feat/my-feature # Force delete local branch
+git remote prune origin # Clean up dead remote references
 
 ```
 
@@ -68,7 +103,7 @@ git push origin main
 
 ## 📝 Conventional Commits
 
-All merge commits to `main` **must** follow the [Conventional Commits](https://www.conventionalcommits.org/) specification. This drives our automated changelogs and semantic versioning.
+The **PR Title** (and the final squash commit) **must** follow the [Conventional Commits](https://www.conventionalcommits.org/) specification. This drives our automated changelogs and semantic versioning.
 
 **Format:** `<type>(<scope>): <description>`
 
