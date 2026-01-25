@@ -9,15 +9,15 @@ dependencies = [
 ]
 
 [tool.uv.workspace]
-members = ["common", "database"]
+members = ["common", "database", "services/backend", "services/editorial"]
 
 
 
 [tool.uv.sources]
 
 news_events_lib = { workspace = true }
-backend = { path = "services/backend" }
-editorial = { path = "services/editorial" }
+backend = { workspace = true }
+editorial = { workspace = true }
 
 [dependency-groups]
 dev = [
