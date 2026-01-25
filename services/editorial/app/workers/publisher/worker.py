@@ -64,17 +64,18 @@ class NewsPublisherWorker(BaseQueueWorker):
             ),  # Only processing to speedup publish
         )
 
-        active_enhancers = select(1).where(
-            NewsEventModel.id == EventsQueueModel.event_id,
-            EventsQueueModel.queue_name == EventsQueueName.ENHANCER,
-            EventsQueueModel.status.in_([JobStatus.PROCESSING]),
-        )
-
         ProcessingQueue = aliased(EventsQueueModel)
         active_processing_events = select(1).where(
             ProcessingQueue.event_id == NewsEventModel.id,
             ProcessingQueue.queue_name == self.queue_name,
             ProcessingQueue.status == JobStatus.PROCESSING,
+        )
+
+        EnhancerQueue = aliased(EventsQueueModel)
+        active_enhancers = select(1).where(
+            EnhancerQueue.event_id == NewsEventModel.id,
+            EnhancerQueue.queue_name == EventsQueueName.ENHANCER,
+            EnhancerQueue.status.in_([JobStatus.PROCESSING]),
         )
 
         # 3. Final Join to fetch only the "Winners" of the deduplication
